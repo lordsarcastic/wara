@@ -184,6 +184,10 @@ impl AuthService {
         ));
         update_user.set(4, UserStatus::Active.as_str());
         update_user.set(5, password_hash);
+        // Without this, exec returns a sparse record (only the set columns) that
+        // Toasty cannot materialize back into a full UserRecord. The updated user is
+        // re-fetched below, so no returning clause is needed.
+        update_user.set_returning_none();
         update_user.exec(&mut db).await.map_err(map_toasty_error)?;
 
         let mut update_invite =
@@ -191,6 +195,7 @@ impl AuthService {
                 UserInviteRecord::fields().id().eq(invite.id),
             ));
         update_invite.set(4, Utc::now().to_rfc3339());
+        update_invite.set_returning_none();
         update_invite
             .exec(&mut db)
             .await
