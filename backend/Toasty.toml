@@ -1,0 +1,10 @@
+# Toasty migration configuration (read by the `wara-migrate` binary).
+# Migration files are authored by `wara-migrate migration generate` and applied
+# by `wara-migrate migration apply`. Run those commands from this directory so
+# `Toasty.toml` and the `toasty/` directory resolve.
+
+[migration]
+path = "toasty"
+prefix_style = "Sequential"
+checksums = false
+statement_breakpoints = true

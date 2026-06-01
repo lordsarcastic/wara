@@ -20,7 +20,13 @@ pub struct Database {
     toasty: Option<toasty::Db>,
 }
 
-pub async fn connect(config: &Config) -> anyhow::Result<Database> {
+/// Build a connected Toasty `Db` with every product model registered.
+///
+/// Shared by [`connect`] and the `wara-migrate` binary so the model set has a
+/// single source of truth. This does not create or migrate the schema; schema is
+/// managed by the `wara-migrate` migration commands (or, for local iteration, by
+/// `WARA_DB_PUSH_SCHEMA`).
+pub async fn build_toasty(config: &Config) -> anyhow::Result<toasty::Db> {
     let db = toasty::Db::builder()
         .models(toasty::models!(
             Project,
@@ -37,7 +43,15 @@ pub async fn connect(config: &Config) -> anyhow::Result<Database> {
         ))
         .connect(&config.database_url)
         .await?;
+    Ok(db)
+}
 
+pub async fn connect(config: &Config) -> anyhow::Result<Database> {
+    let db = build_toasty(config).await?;
+
+    // Schema is applied out of band by `wara-migrate migration apply`.
+    // `WARA_DB_PUSH_SCHEMA` (default false) remains a local-only escape hatch that
+    // lets Toasty regenerate the schema directly while iterating on models.
     if config.db_push_schema {
         db.push_schema().await?;
     }

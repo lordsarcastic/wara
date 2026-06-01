@@ -158,7 +158,7 @@ impl Config {
                 file.secret_key,
                 "development-secret-change-me".to_string(),
             ),
-            db_push_schema: bool_setting("WARA_DB_PUSH_SCHEMA", file.db_push_schema, true),
+            db_push_schema: bool_setting("WARA_DB_PUSH_SCHEMA", file.db_push_schema, false),
             docs_enabled: bool_setting("WARA_DOCS_ENABLED", file.docs_enabled, true),
             remote_services_root: setting(
                 "WARA_REMOTE_SERVICES_ROOT",
@@ -454,6 +454,7 @@ mod tests {
         let vars = [
             "BIND_ADDR",
             "DATABASE_URL",
+            "WARA_DB_PUSH_SCHEMA",
             "WARA_TELEMETRY_ENABLED",
             "WARA_REMOTE_SERVICES_ROOT",
             "WARA_DOCKERFILE_CONTEXT_DIR",
@@ -497,6 +498,7 @@ mod tests {
         assert_eq!(config.dockerfile_context_dir, "src");
         assert_eq!(config.temporal_namespace, "wara");
         assert_eq!(config.otel_service_name, "wara-backend");
+        assert!(!config.db_push_schema);
     }
 
     #[test]

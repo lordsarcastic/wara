@@ -8,7 +8,9 @@ bind_addr: 0.0.0.0:8080
 backend_port: 8080
 frontend_port: 4200
 secret_key: replace-with-a-long-random-secret
-db_push_schema: true
+# Schema is applied by `wara-migrate migration apply`. Set db_push_schema only for
+# local model iteration; it lets Toasty regenerate the schema directly.
+db_push_schema: false
 docs_enabled: true
 remote_services_root: /opt/wara/services
 dockerfile_context_dir: context

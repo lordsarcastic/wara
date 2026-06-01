@@ -22,6 +22,7 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     let test_database_url = create_isolated_database(&database_url).await;
     let mut config = Config::from_env();
     config.database_url = test_database_url.clone();
+    config.db_push_schema = true;
     config.bootstrap_admin_email = "admin-auth@wara.local".to_string();
     config.bootstrap_admin_password = "correct-password".to_string();
     config.bootstrap_admin_name = "Auth Admin".to_string();
@@ -92,6 +93,7 @@ async fn admin_can_invite_user_and_user_accepts_once() {
     let test_database_url = create_isolated_database(&database_url).await;
     let mut config = Config::from_env();
     config.database_url = test_database_url.clone();
+    config.db_push_schema = true;
     config.bootstrap_admin_email = "invite-admin@wara.local".to_string();
     config.bootstrap_admin_password = "correct-password".to_string();
     config.bootstrap_admin_name = "Invite Admin".to_string();

@@ -15,6 +15,7 @@ async fn servers_persist_with_encrypted_ssh_key_material() {
     let mut config = Config::from_env();
     config.database_url = test_database_url.clone();
     config.secret_key = "test-secret-key".to_string();
+    config.db_push_schema = true;
 
     let database = db::connect(&config).await.expect("connect test database");
     let service = ServerService::new(database, config.secret_key.clone());

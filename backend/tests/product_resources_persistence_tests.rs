@@ -31,6 +31,7 @@ async fn product_resources_persist_with_toasty() {
     config.secret_key = "test-secret-key".to_string();
     config.remote_services_root = "/srv/wara/apps".to_string();
     config.dockerfile_context_dir = "source".to_string();
+    config.db_push_schema = true;
 
     let database = db::connect(&config).await.expect("connect test database");
     let project_service = ProjectService::new(database.clone());

@@ -125,6 +125,39 @@ make backend-test
 Integration tests use `WARA_TEST_DATABASE_URL`. The default in `.env.example`
 points at the local compose database.
 
+## Database Migrations
+
+Wara uses Toasty's migration system. Configuration lives in
+[backend/Toasty.toml](./backend/Toasty.toml), and the generated migrations,
+snapshots, and history live in [backend/toasty/](./backend/toasty). A single
+binary, `wara-migrate`, drives everything.
+
+Apply pending migrations:
+
+```bash
+make backend-migrate
+```
+
+This runs `wara-migrate migration apply` against `DATABASE_URL`. Run it in CI and
+production before starting the backend; `docker compose up` runs it automatically
+via a one-shot `migrate` service. A fresh database is fully initialized by
+`migration apply` — `WARA_DB_PUSH_SCHEMA` is not required.
+
+`WARA_DB_PUSH_SCHEMA` (default `false`) is a development-only escape hatch that
+lets Toasty regenerate the schema directly while iterating on models. It bypasses
+migrations and is not a production workflow.
+
+When you change a Toasty model, generate a new migration from the model diff and
+commit the resulting files in `backend/toasty/`:
+
+```bash
+make backend-migrate-generate NAME=describe_change
+```
+
+Existing databases created with `WARA_DB_PUSH_SCHEMA` have no Toasty migration
+history, so `migration apply` will not adopt them; recreate the database (or use
+`wara-migrate migration reset`) since development databases are disposable.
+
 ## Run Frontend Locally
 
 ```bash

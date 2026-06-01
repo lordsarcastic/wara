@@ -20,6 +20,17 @@ services:
       timeout: 5s
       retries: 30
 
+  migrate:
+    build:
+      context: ./backend
+    command: ["wara-migrate", "migration", "apply"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-wara}:${POSTGRES_PASSWORD:-wara}@postgres:5432/${POSTGRES_DB:-wara}
+      WARA_TELEMETRY_ENABLED: ${WARA_TELEMETRY_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   backend:
     build:
       context: ./backend
@@ -36,6 +47,8 @@ services:
         condition: service_healthy
       temporal:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "${BACKEND_PORT:-8080}:8080"
 

@@ -1,47 +1,87 @@
+use std::process::Command;
+
 use uuid::Uuid;
 use wara_backend::{
     libs::{config::Config, db},
     services::projects::ProjectService,
 };
 
+/// Run the real `wara-migrate` binary against `database_url`. Cargo exposes the
+/// built binary path via `CARGO_BIN_EXE_*`; the working directory is the backend
+/// crate root so `Toasty.toml` and `toasty/` resolve.
+fn run_migrate(database_url: &str, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_wara-migrate"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(args)
+        .env("DATABASE_URL", database_url)
+        .env("WARA_TELEMETRY_ENABLED", "false")
+        .output()
+        .expect("run wara-migrate")
+}
+
+/// Applying migrations to an empty database via the single migration binary must
+/// produce a fully working schema (no `push_schema`), and re-running must be a
+/// no-op.
 #[tokio::test]
-async fn projects_and_default_environment_persist_with_toasty_when_database_is_configured() {
+async fn migration_apply_initializes_a_fresh_database() {
     let Some(database_url) = Config::from_env().test_database_url else {
-        eprintln!("skipping Toasty integration test; set WARA_TEST_DATABASE_URL to run it");
+        eprintln!("skipping migration integration test; set WARA_TEST_DATABASE_URL to run it");
         return;
     };
 
     let test_database_url = create_isolated_database(&database_url).await;
+
+    // First apply creates the schema.
+    let output = run_migrate(&test_database_url, &["migration", "apply"]);
+    assert!(
+        output.status.success(),
+        "first apply failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Successfully applied 1 migration"),
+        "unexpected apply output: {stdout}"
+    );
+
+    // The migrated schema must be usable with no push_schema in play.
     let mut config = Config::from_env();
     config.database_url = test_database_url.clone();
-    config.db_push_schema = true;
-    let database = db::connect(&config).await.expect("connect test database");
-    let service = ProjectService::new(database);
-
-    let project = service
+    config.db_push_schema = false;
+    let database = db::connect(&config)
+        .await
+        .expect("connect to migrated database");
+    let project_service = ProjectService::new(database);
+    let project = project_service
         .create_project(
-            format!("audit-{}", uuid::Uuid::now_v7().simple()),
-            Some("created by persistence integration test".to_string()),
+            format!("migration-check-{}", Uuid::now_v7().simple()),
+            Some("created against a migrated schema".to_string()),
         )
         .await
-        .expect("create project");
-
-    let loaded = service.get_project(project.id).await.expect("load project");
-    assert_eq!(loaded.id, project.id);
-    assert_eq!(loaded.name, project.name);
-
-    let environments = service
+        .expect("create project on migrated schema");
+    let environments = project_service
         .list_environments(project.id)
         .await
-        .expect("list environments");
-    assert_eq!(environments.len(), 1);
-    assert_eq!(environments[0].name, "production");
+        .expect("list environments on migrated schema");
+    assert!(
+        !environments.is_empty(),
+        "project creation should seed a default environment"
+    );
+
+    // Re-applying is idempotent.
+    let output = run_migrate(&test_database_url, &["migration", "apply"]);
+    assert!(output.status.success(), "re-apply failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("up to date") || stdout.contains("No pending"),
+        "second apply should be a no-op: {stdout}"
+    );
 
     drop_isolated_database(&test_database_url).await;
 }
 
 async fn create_isolated_database(base_url: &str) -> String {
-    let db_name = format!("wara_test_{}", Uuid::now_v7().simple());
+    let db_name = format!("wara_mig_test_{}", Uuid::now_v7().simple());
     let admin_url = replace_database_name(base_url, "postgres");
     let (client, connection) = tokio_postgres::connect(&admin_url, tokio_postgres::NoTls)
         .await

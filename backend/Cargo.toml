@@ -13,6 +13,10 @@ path = "src/main.rs"
 name = "temporal_worker"
 path = "src/bin/temporal_worker.rs"
 
+[[bin]]
+name = "wara-migrate"
+path = "src/bin/migrate.rs"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
@@ -48,7 +52,10 @@ argon2 = "0.5.3"
 # dependency, not a complete provider, which leaves jsonwebtoken without a
 # CryptoProvider at runtime.
 jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
+# Drives the `wara-migrate` binary: Toasty's first-class migration system
+# (Toasty.toml + generate/apply/snapshot over the registered models).
+toasty-cli = "0.7"
 
 [dev-dependencies]
-tokio-postgres = "0.7.17"
 tower = { version = "0.5", features = ["util"] }
+tokio-postgres = "0.7.17"
