@@ -448,6 +448,28 @@ mod tests {
 
     #[test]
     fn config_file_values_fill_defaults() {
+        // The loader gives environment variables precedence over file values, so the
+        // variables this test asserts are cleared first to keep it deterministic
+        // regardless of the ambient environment (CI, for example, sets DATABASE_URL).
+        let vars = [
+            "BIND_ADDR",
+            "DATABASE_URL",
+            "WARA_TELEMETRY_ENABLED",
+            "WARA_REMOTE_SERVICES_ROOT",
+            "WARA_DOCKERFILE_CONTEXT_DIR",
+            "TEMPORAL_NAMESPACE",
+            "OTEL_SERVICE_NAME",
+        ];
+        let saved: Vec<(&str, Option<String>)> = vars
+            .iter()
+            .map(|&key| (key, std::env::var(key).ok()))
+            .collect();
+        unsafe {
+            for &key in &vars {
+                std::env::remove_var(key);
+            }
+        }
+
         let config = Config::from_sources(ConfigFile {
             bind_addr: Some("127.0.0.1:9000".to_string()),
             database_url: Some("postgres://file".to_string()),
@@ -457,6 +479,16 @@ mod tests {
             temporal_namespace: Some("wara".to_string()),
             ..ConfigFile::default()
         });
+
+        // Restore before asserting so a failed assertion cannot leak environment state.
+        unsafe {
+            for (key, value) in saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
 
         assert_eq!(config.bind_addr, "127.0.0.1:9000");
         assert_eq!(config.database_url, "postgres://file");

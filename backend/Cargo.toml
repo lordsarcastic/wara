@@ -43,7 +43,11 @@ uuid = { version = "1", features = ["serde", "v4", "v7"] }
 axum-valid = "0.24.0"
 validator = { version = "0.20.0", features = ["derive"] }
 argon2 = "0.5.3"
-jsonwebtoken = { version = "10.4.0", features = ["rsa"] }
+# `rust_crypto` selects the pure-Rust crypto provider (no C toolchain dependency)
+# and pulls in RSA support for RS256. The `rsa` name alone is only the optional
+# dependency, not a complete provider, which leaves jsonwebtoken without a
+# CryptoProvider at runtime.
+jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
 
 [dev-dependencies]
 tokio-postgres = "0.7.17"

@@ -79,7 +79,7 @@ async fn product_resources_persist_with_toasty() {
         })
         .await
         .expect("create credential");
-    assert_eq!(credential.password, "[redacted]");
+    assert_eq!(credential.password, "********");
 
     let env_var = credential_service
         .create_env_var(CreateEnvVarInput {
@@ -91,7 +91,7 @@ async fn product_resources_persist_with_toasty() {
         })
         .await
         .expect("create env var");
-    assert_eq!(env_var.value, "[redacted]");
+    assert_eq!(env_var.value, "********");
     assert!(
         !serde_json::to_string(&env_var)
             .expect("serialize env var")
