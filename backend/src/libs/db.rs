@@ -9,7 +9,7 @@ use crate::{
         servers::ServerRecord,
         services::AppServiceRecord,
         templates::WorkspaceTemplateRecord,
-        users::{UserInviteRecord, UserRecord, WorkspaceUserRoleRecord},
+        users::{UserApiTokenRecord, UserInviteRecord, UserRecord, WorkspaceUserRoleRecord},
         workspaces::Workspace,
     },
 };
@@ -40,6 +40,7 @@ pub async fn build_toasty(config: &Config) -> anyhow::Result<toasty::Db> {
             WorkspaceTemplateRecord,
             UserRecord,
             UserInviteRecord,
+            UserApiTokenRecord,
             WorkspaceUserRoleRecord
         ))
         .connect(&config.database_url)
