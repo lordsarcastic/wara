@@ -14,6 +14,7 @@ use jsonwebtoken::{
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use toasty::Executor;
 use toasty::stmt::{List, Query, Update};
 use uuid::Uuid;
 
@@ -22,8 +23,8 @@ use crate::{
     libs::{config::Config, db::Database},
     models::{
         users::{
-            Role, User, UserApiTokenRecord, UserInviteRecord, UserRecord, UserStatus,
-            WorkspaceUserRoleRecord,
+            Role, User, UserApiTokenRecord, UserInviteRecord, UserRecord, UserRefreshTokenRecord,
+            UserStatus, WorkspaceUserRoleRecord,
         },
         workspaces::Workspace,
     },
@@ -39,6 +40,7 @@ pub struct LoginInput {
 #[derive(Debug, Clone)]
 pub struct LoginOutput {
     pub token: String,
+    pub refresh_token: String,
     pub user: User,
 }
 
@@ -65,6 +67,16 @@ pub struct AcceptInviteInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct RefreshSessionInput {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogoutInput {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateApiTokenInput {
     pub user: User,
     pub name: String,
@@ -78,6 +90,8 @@ pub struct CreateApiTokenOutput {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
+    jti: String,
+    ret: String,
     sub: String,
     email: String,
     role: String,
@@ -85,6 +99,22 @@ struct Claims {
     aud: String,
     iat: u64,
     exp: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RefreshClaims {
+    jti: String,
+    sub: String,
+    typ: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
+
+struct RefreshTokenIssue {
+    token: String,
+    record: UserRefreshTokenRecord,
 }
 
 #[derive(Clone)]
@@ -133,8 +163,14 @@ impl AuthService {
         }
         verify_password(&input.password, &user_record.password_hash)?;
         let user = self.user_from_record(user_record).await?;
-        let token = self.sign_access_token(&user)?;
-        Ok(LoginOutput { token, user })
+        let mut db = self.db.handle()?;
+        let refresh_token = self.issue_refresh_token(&mut db, user.id).await?;
+        let token = self.sign_access_token(&user, refresh_token.record.id)?;
+        Ok(LoginOutput {
+            token,
+            refresh_token: refresh_token.token,
+            user,
+        })
     }
 
     pub async fn invite_user(&self, input: InviteUserInput) -> Result<InviteUserOutput, ApiError> {
@@ -243,8 +279,65 @@ impl AuthService {
             .map_err(map_toasty_error)?;
 
         let user = self.get_user(invite.user_id).await?;
-        let token = self.sign_access_token(&user)?;
-        Ok(LoginOutput { token, user })
+        let refresh_token = self.issue_refresh_token(&mut db, user.id).await?;
+        let token = self.sign_access_token(&user, refresh_token.record.id)?;
+        Ok(LoginOutput {
+            token,
+            refresh_token: refresh_token.token,
+            user,
+        })
+    }
+
+    pub async fn refresh_session(
+        &self,
+        input: RefreshSessionInput,
+    ) -> Result<LoginOutput, ApiError> {
+        let record = self
+            .active_refresh_token_record(&input.refresh_token)
+            .await?;
+        let user_record = self.get_user_record(record.user_id).await?;
+        if user_record.status != UserStatus::Active.as_str() {
+            return Err(ApiError::Unauthorized);
+        }
+        let user = self.user_from_record(user_record).await?;
+
+        let mut db = self.db.handle()?;
+        let mut tx = db.transaction().await.map_err(map_toasty_error)?;
+        let refresh_token = self.issue_refresh_token(&mut tx, user.id).await?;
+
+        let now = Utc::now();
+        let mut update_old = Update::<List<UserRefreshTokenRecord>>::new(Query::<
+            List<UserRefreshTokenRecord>,
+        >::filter(
+            UserRefreshTokenRecord::fields().id().eq(record.id),
+        ));
+        update_old.set(4, now.to_rfc3339());
+        update_old.set_returning_none();
+        update_old.exec(&mut tx).await.map_err(map_toasty_error)?;
+        tx.commit().await.map_err(map_toasty_error)?;
+
+        let token = self.sign_access_token(&user, refresh_token.record.id)?;
+        Ok(LoginOutput {
+            token,
+            refresh_token: refresh_token.token,
+            user,
+        })
+    }
+
+    pub async fn logout(&self, input: LogoutInput) -> Result<(), ApiError> {
+        let record = self
+            .active_refresh_token_record(&input.refresh_token)
+            .await?;
+        let mut db = self.db.handle()?;
+        let mut update_token = Update::<List<UserRefreshTokenRecord>>::new(Query::<
+            List<UserRefreshTokenRecord>,
+        >::filter(
+            UserRefreshTokenRecord::fields().id().eq(record.id),
+        ));
+        update_token.set(4, Utc::now().to_rfc3339());
+        update_token.set_returning_none();
+        update_token.exec(&mut db).await.map_err(map_toasty_error)?;
+        Ok(())
     }
 
     pub async fn authenticate_bearer(&self, token: &str) -> Result<User, ApiError> {
@@ -355,6 +448,60 @@ impl AuthService {
         Ok(record)
     }
 
+    async fn issue_refresh_token(
+        &self,
+        executor: &mut dyn Executor,
+        user_id: Uuid,
+    ) -> Result<RefreshTokenIssue, ApiError> {
+        let id = Uuid::now_v7();
+        let now = Utc::now();
+        let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
+        let record = toasty::create!(UserRefreshTokenRecord {
+            id,
+            user_id,
+            created_at: now.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+            revoked_at: None,
+        })
+        .exec(executor)
+        .await
+        .map_err(map_toasty_error)?;
+        let raw_token = self.sign_refresh_token(id, user_id, now, expires_at)?;
+        Ok(RefreshTokenIssue {
+            token: raw_token,
+            record,
+        })
+    }
+
+    async fn active_refresh_token_record(
+        &self,
+        token: &str,
+    ) -> Result<UserRefreshTokenRecord, ApiError> {
+        let claims = self.verify_refresh_token(token)?;
+        let token_id = Uuid::parse_str(&claims.jti).map_err(|_| ApiError::Unauthorized)?;
+        let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+        let mut db = self.db.handle()?;
+        let record = Query::<List<UserRefreshTokenRecord>>::filter(
+            UserRefreshTokenRecord::fields().id().eq(token_id),
+        )
+        .first()
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?
+        .ok_or(ApiError::Unauthorized)?;
+        if record.user_id != user_id {
+            return Err(ApiError::Unauthorized);
+        }
+
+        if record.revoked_at.is_some() {
+            return Err(ApiError::Unauthorized);
+        }
+        if parse_rfc3339(&record.expires_at)? <= Utc::now() {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(record)
+    }
+
     async fn get_user(&self, id: Uuid) -> Result<User, ApiError> {
         let record = self.get_user_record(id).await?;
         self.user_from_record(record).await
@@ -459,9 +606,11 @@ impl AuthService {
         Ok(invite)
     }
 
-    fn sign_access_token(&self, user: &User) -> Result<String, ApiError> {
+    fn sign_access_token(&self, user: &User, refresh_token_id: Uuid) -> Result<String, ApiError> {
         let now = get_current_timestamp();
         let claims = Claims {
+            jti: Uuid::now_v7().to_string(),
+            ret: refresh_token_id.to_string(),
             sub: user.id.to_string(),
             email: user.email.clone(),
             role: user.role.as_str().to_string(),
@@ -476,6 +625,28 @@ impl AuthService {
             .map_err(|error| ApiError::Internal(format!("failed to sign JWT: {error}")))
     }
 
+    fn sign_refresh_token(
+        &self,
+        refresh_token_id: Uuid,
+        user_id: Uuid,
+        issued_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<String, ApiError> {
+        let claims = RefreshClaims {
+            jti: refresh_token_id.to_string(),
+            sub: user_id.to_string(),
+            typ: "refresh".to_string(),
+            iss: self.config.jwt_issuer.clone(),
+            aud: self.config.jwt_audience.clone(),
+            iat: issued_at.timestamp() as u64,
+            exp: expires_at.timestamp() as u64,
+        };
+        let key = EncodingKey::from_rsa_pem(self.config.jwt_private_key_pem.as_bytes())
+            .map_err(|error| ApiError::Internal(format!("invalid JWT private key: {error}")))?;
+        encode(&Header::new(Algorithm::RS256), &claims, &key)
+            .map_err(|error| ApiError::Internal(format!("failed to sign refresh JWT: {error}")))
+    }
+
     fn verify_access_token(&self, token: &str) -> Result<Claims, ApiError> {
         let key = DecodingKey::from_rsa_pem(self.config.jwt_public_key_pem.as_bytes())
             .map_err(|error| ApiError::Internal(format!("invalid JWT public key: {error}")))?;
@@ -486,6 +657,22 @@ impl AuthService {
         decode::<Claims>(token, &key, &validation)
             .map(|data| data.claims)
             .map_err(|_| ApiError::Unauthorized)
+    }
+
+    fn verify_refresh_token(&self, token: &str) -> Result<RefreshClaims, ApiError> {
+        let key = DecodingKey::from_rsa_pem(self.config.jwt_public_key_pem.as_bytes())
+            .map_err(|error| ApiError::Internal(format!("invalid JWT public key: {error}")))?;
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[self.config.jwt_audience.as_str()]);
+        validation.set_issuer(&[self.config.jwt_issuer.as_str()]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub", "jti"]);
+        let claims = decode::<RefreshClaims>(token, &key, &validation)
+            .map(|data| data.claims)
+            .map_err(|_| ApiError::Unauthorized)?;
+        if claims.typ != "refresh" {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(claims)
     }
 }
 

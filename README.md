@@ -206,9 +206,17 @@ are versioned under `/api/v1`.
 Current auth flow:
 
 1. Login with `POST /api/v1/auth/login`.
-2. Use the returned JWT as `Authorization: Bearer <token>`.
-3. Admins can invite users with `POST /api/v1/admin/users`.
-4. Invited users open `/accept-invite?token=...` and create a password.
+2. Use the returned JWT access token as `Authorization: Bearer <token>`.
+3. Store the returned refresh JWT securely on the client. Its `jti` is the
+   refresh-token record id.
+4. Refresh sessions with `POST /api/v1/auth/refresh`; this returns a new access
+   token and a new refresh token, and revokes the refresh token that was used.
+5. Logout with `POST /api/v1/auth/logout` to revoke the active refresh token.
+6. Admins can invite users with `POST /api/v1/admin/users`.
+7. Invited users open `/accept-invite?token=...` and create a password.
+
+Refresh token plaintext is returned only by login, invite acceptance, and
+refresh responses. Listing, revocation, and error responses must not expose it.
 
 ## Contributing
 

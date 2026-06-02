@@ -2,12 +2,16 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use jsonwebtoken::{
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, get_current_timestamp,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower::ServiceExt;
 use uuid::Uuid;
 use wara_backend::{
     libs::{config::Config, db, docker::DeployKind},
-    models::users::{Role, UserApiTokenRecord, WorkspaceUserRoleRecord},
+    models::users::{Role, UserApiTokenRecord, UserRefreshTokenRecord, WorkspaceUserRoleRecord},
     routes,
     services::{
         app_services::{AppServiceService, CreateAppServiceInput},
@@ -16,6 +20,30 @@ use wara_backend::{
     },
     state::AppState,
 };
+
+#[derive(Debug, Deserialize)]
+struct TestClaims {
+    jti: String,
+    ret: String,
+    sub: String,
+    email: String,
+    role: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TestRefreshClaims {
+    jti: String,
+    sub: String,
+    typ: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
 
 #[tokio::test]
 async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
@@ -37,7 +65,7 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
         .bootstrap_admin()
         .await
         .expect("bootstrap admin");
-    let app = routes::router(AppState::new(config, database));
+    let app = routes::router(AppState::new(config.clone(), database));
 
     let login_response = app
         .clone()
@@ -57,6 +85,18 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     let login_body = response_json(login_response).await;
     let token = login_body["token"].as_str().expect("jwt token");
     assert_eq!(token.split('.').count(), 3);
+    let claims = decode_access_claims(&config, token);
+    assert!(Uuid::parse_str(&claims.jti).is_ok());
+    assert_eq!(
+        claims.sub,
+        login_body["user"]["id"].as_str().expect("user id")
+    );
+    assert_eq!(claims.email, "admin-auth@wara.local");
+    assert_eq!(claims.role, "super_admin");
+    assert_eq!(claims.iss, config.jwt_issuer);
+    assert_eq!(claims.aud, config.jwt_audience);
+    assert!(claims.exp > claims.iat);
+    assert!(Uuid::parse_str(&claims.ret).is_ok());
 
     let me_response = app
         .clone()
@@ -85,6 +125,272 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
         .await
         .unwrap();
     assert_eq!(tampered_response.status(), StatusCode::UNAUTHORIZED);
+
+    drop_isolated_database(&test_database_url).await;
+}
+
+#[tokio::test]
+async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() {
+    let Some(database_url) = Config::from_env().test_database_url else {
+        eprintln!("skipping Toasty integration test; set WARA_TEST_DATABASE_URL to run it");
+        return;
+    };
+
+    let test_database_url = create_isolated_database(&database_url).await;
+    let mut config = Config::from_env();
+    config.database_url = test_database_url.clone();
+    config.db_push_schema = true;
+    config.bootstrap_admin_email = "refresh-admin@wara.local".to_string();
+    config.bootstrap_admin_password = "correct-password".to_string();
+    config.bootstrap_admin_name = "Refresh Admin".to_string();
+
+    let database = db::connect(&config).await.expect("connect test database");
+    AuthService::new(database.clone(), config.clone())
+        .bootstrap_admin()
+        .await
+        .expect("bootstrap admin");
+    let app = routes::router(AppState::new(config.clone(), database.clone()));
+
+    let first_login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"email":"refresh-admin@wara.local","password":"correct-password"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_login.status(), StatusCode::OK);
+    let first_login_body = response_json(first_login).await;
+    let first_access_token = first_login_body["token"].as_str().expect("access token");
+    let user_id = Uuid::parse_str(
+        first_login_body["user"]["id"]
+            .as_str()
+            .expect("login user id"),
+    )
+    .expect("parse user id");
+    let expired_refresh_token = first_login_body["refresh_token"]
+        .as_str()
+        .expect("refresh token")
+        .to_string();
+    assert_eq!(expired_refresh_token.split('.').count(), 3);
+
+    let mut db_handle = database.handle().expect("database handle");
+    let issued_records = toasty::stmt::Query::<toasty::stmt::List<UserRefreshTokenRecord>>::filter(
+        UserRefreshTokenRecord::fields().user_id().eq(user_id),
+    )
+    .exec(&mut db_handle)
+    .await
+    .expect("list refresh token records");
+    assert_eq!(issued_records.len(), 1);
+    let first_claims = decode_access_claims(&config, first_access_token);
+    assert!(Uuid::parse_str(&first_claims.jti).is_ok());
+    assert_eq!(first_claims.ret, issued_records[0].id.to_string());
+    let first_refresh_claims = decode_refresh_claims(&config, &expired_refresh_token);
+    assert_eq!(first_refresh_claims.jti, issued_records[0].id.to_string());
+    assert_eq!(first_refresh_claims.sub, user_id.to_string());
+    assert_eq!(first_refresh_claims.typ, "refresh");
+    assert_eq!(first_refresh_claims.iss, config.jwt_issuer);
+    assert_eq!(first_refresh_claims.aud, config.jwt_audience);
+    assert!(first_refresh_claims.exp > first_refresh_claims.iat);
+
+    let mut expire_token = toasty::stmt::Update::<toasty::stmt::List<UserRefreshTokenRecord>>::new(
+        toasty::stmt::Query::<toasty::stmt::List<UserRefreshTokenRecord>>::filter(
+            UserRefreshTokenRecord::fields()
+                .id()
+                .eq(issued_records[0].id),
+        ),
+    );
+    expire_token.set(3, chrono::Utc::now().to_rfc3339());
+    expire_token.set_returning_none();
+    expire_token
+        .exec(&mut db_handle)
+        .await
+        .expect("expire refresh token");
+
+    let expired_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{expired_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(expired_response.status(), StatusCode::UNAUTHORIZED);
+
+    let malformed_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"refresh_token":"not-a-refresh-token"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(malformed_response.status(), StatusCode::UNAUTHORIZED);
+
+    let unknown_refresh_token = sign_unknown_refresh_token(&config, user_id);
+    let unknown_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{unknown_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_response.status(), StatusCode::UNAUTHORIZED);
+
+    let tampered_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{expired_refresh_token}tampered"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tampered_response.status(), StatusCode::UNAUTHORIZED);
+
+    let active_login_body =
+        login_response(&app, "refresh-admin@wara.local", "correct-password").await;
+    let active_access_token = active_login_body["token"]
+        .as_str()
+        .expect("active access token");
+    let active_refresh_token = active_login_body["refresh_token"]
+        .as_str()
+        .expect("active refresh token")
+        .to_string();
+
+    let refresh_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{active_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refresh_response.status(), StatusCode::OK);
+    let refresh_body = response_json(refresh_response).await;
+    let rotated_access_token = refresh_body["token"]
+        .as_str()
+        .expect("rotated access token");
+    let rotated_refresh_token = refresh_body["refresh_token"]
+        .as_str()
+        .expect("rotated refresh token")
+        .to_string();
+    assert_eq!(rotated_access_token.split('.').count(), 3);
+    assert_eq!(rotated_refresh_token.split('.').count(), 3);
+    assert_ne!(active_refresh_token, rotated_refresh_token);
+    assert!(
+        !refresh_body.to_string().contains(&active_refresh_token),
+        "refresh response must not return the old plaintext refresh token"
+    );
+
+    let records = toasty::stmt::Query::<toasty::stmt::List<UserRefreshTokenRecord>>::filter(
+        UserRefreshTokenRecord::fields().user_id().eq(user_id),
+    )
+    .exec(&mut db_handle)
+    .await
+    .expect("list rotated refresh token records");
+    let active_claims = decode_access_claims(&config, active_access_token);
+    let revoked_old = records
+        .iter()
+        .find(|record| record.id.to_string() == active_claims.ret)
+        .expect("old refresh token record");
+    assert!(revoked_old.revoked_at.is_some());
+    assert_eq!(active_claims.ret, revoked_old.id.to_string());
+    let active_refresh_claims = decode_refresh_claims(&config, &active_refresh_token);
+    assert_eq!(active_refresh_claims.jti, active_claims.ret);
+    let rotated_claims = decode_access_claims(&config, rotated_access_token);
+    let active_new = records
+        .iter()
+        .find(|record| record.id.to_string() == rotated_claims.ret)
+        .expect("rotated refresh token record");
+    assert!(active_new.revoked_at.is_none());
+    let rotated_refresh_claims = decode_refresh_claims(&config, &rotated_refresh_token);
+    assert_eq!(rotated_refresh_claims.jti, rotated_claims.ret);
+    assert_eq!(rotated_refresh_claims.sub, user_id.to_string());
+    assert!(Uuid::parse_str(&rotated_claims.jti).is_ok());
+    assert_ne!(rotated_claims.jti, active_claims.jti);
+    assert_eq!(rotated_claims.ret, active_new.id.to_string());
+
+    let reused_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{active_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reused_response.status(), StatusCode::UNAUTHORIZED);
+
+    let logout_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{rotated_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout_response.status(), StatusCode::NO_CONTENT);
+
+    let revoked_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{rotated_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked_response.status(), StatusCode::UNAUTHORIZED);
 
     drop_isolated_database(&test_database_url).await;
 }
@@ -764,7 +1070,54 @@ async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("parse response JSON")
 }
 
+fn decode_access_claims(config: &Config, token: &str) -> TestClaims {
+    let key = DecodingKey::from_rsa_pem(config.jwt_public_key_pem.as_bytes())
+        .expect("test public key should parse");
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&[config.jwt_audience.as_str()]);
+    validation.set_issuer(&[config.jwt_issuer.as_str()]);
+    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+    decode::<TestClaims>(token, &key, &validation)
+        .expect("access token should decode")
+        .claims
+}
+
+fn decode_refresh_claims(config: &Config, token: &str) -> TestRefreshClaims {
+    let key = DecodingKey::from_rsa_pem(config.jwt_public_key_pem.as_bytes())
+        .expect("test public key should parse");
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&[config.jwt_audience.as_str()]);
+    validation.set_issuer(&[config.jwt_issuer.as_str()]);
+    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub", "jti"]);
+    decode::<TestRefreshClaims>(token, &key, &validation)
+        .expect("refresh token should decode")
+        .claims
+}
+
+fn sign_unknown_refresh_token(config: &Config, user_id: Uuid) -> String {
+    let now = get_current_timestamp();
+    let claims = TestRefreshClaims {
+        jti: Uuid::now_v7().to_string(),
+        sub: user_id.to_string(),
+        typ: "refresh".to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.jwt_audience.clone(),
+        iat: now,
+        exp: now + config.refresh_token_ttl_seconds,
+    };
+    let key = EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
+        .expect("test private key should parse");
+    encode(&Header::new(Algorithm::RS256), &claims, &key).expect("sign refresh token")
+}
+
 async fn login(app: &axum::Router, email: &str, password: &str) -> String {
+    login_response(app, email, password).await["token"]
+        .as_str()
+        .expect("login token")
+        .to_string()
+}
+
+async fn login_response(app: &axum::Router, email: &str, password: &str) -> Value {
     let response = app
         .clone()
         .oneshot(
@@ -780,10 +1133,7 @@ async fn login(app: &axum::Router, email: &str, password: &str) -> String {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    response_json(response).await["token"]
-        .as_str()
-        .expect("login token")
-        .to_string()
+    response_json(response).await
 }
 
 async fn invite_accept_and_token(
