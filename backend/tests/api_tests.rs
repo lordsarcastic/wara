@@ -1,6 +1,7 @@
 use axum::{
-    body::Body,
+    body::{Body, to_bytes},
     http::{Method, Request, StatusCode},
+    response::Response,
 };
 use serde_json::Value;
 use tower::ServiceExt;
@@ -43,6 +44,7 @@ async fn protected_routes_require_auth() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_error(response, "unauthorized", "authentication required").await;
 }
 
 #[tokio::test]
@@ -73,6 +75,67 @@ async fn invalid_json_payloads_are_rejected_by_validation() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = assert_error(response, "bad_request", "invalid request").await;
+    assert!(
+        body.get("details").and_then(Value::as_str).is_some(),
+        "validation response should include rejection details"
+    );
+}
+
+#[tokio::test]
+async fn malformed_json_payloads_use_error_envelope() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"email":"admin@wara.local""#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_error(response, "bad_request", "invalid request").await;
+}
+
+#[tokio::test]
+async fn unmatched_api_routes_use_error_envelope() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/not-a-real-route")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_error(response, "not_found", "route not found").await;
+}
+
+#[tokio::test]
+async fn internal_errors_are_redacted_in_error_envelope() {
+    let mut config = Config::from_env();
+    config.jwt_public_key_pem = "not a valid public key".to_string();
+    let state = AppState::new(config, Database::unavailable_for_tests());
+    let response = routes::router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", "Bearer malformed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = assert_error(response, "internal_error", "internal server error").await;
+    assert!(
+        !body.to_string().contains("public key"),
+        "internal details must not leak: {body}"
+    );
 }
 
 #[tokio::test]
@@ -115,6 +178,7 @@ async fn product_resource_path_ids_must_be_uuids() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        assert_error(response, "bad_request", "invalid request").await;
     }
 }
 
@@ -156,4 +220,46 @@ fn openapi_path_id_parameters_are_documented_as_uuids() {
             }
         }
     }
+}
+
+#[test]
+fn openapi_documents_common_error_responses() {
+    let openapi = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI document");
+    let paths = openapi
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("OpenAPI paths object");
+
+    for (path, operations) in paths {
+        let operations = operations.as_object().expect("path item object");
+        for (method, operation) in operations {
+            let responses = operation
+                .get("responses")
+                .and_then(Value::as_object)
+                .expect("operation responses object");
+            for status in ["400", "401", "403", "404", "500"] {
+                let response = responses
+                    .get(status)
+                    .unwrap_or_else(|| panic!("{method} {path} missing {status} response"));
+                let schema_ref = response
+                    .pointer("/content/application~1json/schema/$ref")
+                    .and_then(Value::as_str);
+                assert_eq!(
+                    schema_ref,
+                    Some("#/components/schemas/ErrorResponse"),
+                    "{method} {path} {status} should document ErrorResponse"
+                );
+            }
+        }
+    }
+}
+
+async fn assert_error(response: Response, code: &str, message: &str) -> Value {
+    let bytes = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("read response body");
+    let body = serde_json::from_slice::<Value>(&bytes).expect("error response should be JSON");
+    assert_eq!(body["code"], code);
+    assert_eq!(body["message"], message);
+    body
 }

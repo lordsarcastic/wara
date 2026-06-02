@@ -105,5 +105,49 @@ impl utoipa::Modify for SecurityAddon {
                     .build(),
             ),
         );
+
+        for path_item in openapi.paths.paths.values_mut() {
+            for operation in [
+                path_item.get.as_mut(),
+                path_item.put.as_mut(),
+                path_item.post.as_mut(),
+                path_item.delete.as_mut(),
+                path_item.options.as_mut(),
+                path_item.head.as_mut(),
+                path_item.patch.as_mut(),
+                path_item.trace.as_mut(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                add_common_error_responses(operation);
+            }
+        }
+    }
+}
+
+fn add_common_error_responses(operation: &mut utoipa::openapi::path::Operation) {
+    use utoipa::openapi::{Content, Ref, RefOr, response::ResponseBuilder};
+
+    for (status, description) in [
+        ("400", "Invalid request"),
+        ("401", "Authentication required"),
+        ("403", "Forbidden"),
+        ("404", "Resource not found"),
+        ("500", "Internal server error"),
+    ] {
+        operation
+            .responses
+            .responses
+            .entry(status.to_string())
+            .or_insert(RefOr::T(
+                ResponseBuilder::new()
+                    .description(description)
+                    .content(
+                        "application/json",
+                        Content::new(Some(Ref::from_schema_name("ErrorResponse"))),
+                    )
+                    .build(),
+            ));
     }
 }

@@ -521,6 +521,9 @@ async fn workspace_admin_can_invite_only_to_their_workspace() {
         workspace_admin_servers_response.status(),
         StatusCode::FORBIDDEN
     );
+    let forbidden_body = response_json(workspace_admin_servers_response).await;
+    assert_eq!(forbidden_body["code"], "forbidden");
+    assert_eq!(forbidden_body["message"], "forbidden");
 
     let viewer_invite_response = app
         .clone()
