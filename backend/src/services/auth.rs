@@ -14,6 +14,7 @@ use jsonwebtoken::{
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use toasty::Executor;
 use toasty::stmt::{List, Query, Update};
 use uuid::Uuid;
 
@@ -162,7 +163,8 @@ impl AuthService {
         }
         verify_password(&input.password, &user_record.password_hash)?;
         let user = self.user_from_record(user_record).await?;
-        let refresh_token = self.create_refresh_token(user.id).await?;
+        let mut db = self.db.handle()?;
+        let refresh_token = self.issue_refresh_token(&mut db, user.id).await?;
         let token = self.sign_access_token(&user, refresh_token.record.id)?;
         Ok(LoginOutput {
             token,
@@ -277,7 +279,7 @@ impl AuthService {
             .map_err(map_toasty_error)?;
 
         let user = self.get_user(invite.user_id).await?;
-        let refresh_token = self.create_refresh_token(user.id).await?;
+        let refresh_token = self.issue_refresh_token(&mut db, user.id).await?;
         let token = self.sign_access_token(&user, refresh_token.record.id)?;
         Ok(LoginOutput {
             token,
@@ -299,23 +301,11 @@ impl AuthService {
         }
         let user = self.user_from_record(user_record).await?;
 
-        let new_record_id = Uuid::now_v7();
-        let now = Utc::now();
-        let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
-
         let mut db = self.db.handle()?;
         let mut tx = db.transaction().await.map_err(map_toasty_error)?;
-        let new_record = toasty::create!(UserRefreshTokenRecord {
-            id: new_record_id,
-            user_id: user.id,
-            created_at: now.to_rfc3339(),
-            expires_at: expires_at.to_rfc3339(),
-            revoked_at: None,
-        })
-        .exec(&mut tx)
-        .await
-        .map_err(map_toasty_error)?;
+        let refresh_token = self.issue_refresh_token(&mut tx, user.id).await?;
 
+        let now = Utc::now();
         let mut update_old = Update::<List<UserRefreshTokenRecord>>::new(Query::<
             List<UserRefreshTokenRecord>,
         >::filter(
@@ -326,11 +316,10 @@ impl AuthService {
         update_old.exec(&mut tx).await.map_err(map_toasty_error)?;
         tx.commit().await.map_err(map_toasty_error)?;
 
-        let raw_refresh_token = self.sign_refresh_token(new_record.id, user.id, now, expires_at)?;
-        let token = self.sign_access_token(&user, new_record.id)?;
+        let token = self.sign_access_token(&user, refresh_token.record.id)?;
         Ok(LoginOutput {
             token,
-            refresh_token: raw_refresh_token,
+            refresh_token: refresh_token.token,
             user,
         })
     }
@@ -459,11 +448,14 @@ impl AuthService {
         Ok(record)
     }
 
-    async fn create_refresh_token(&self, user_id: Uuid) -> Result<RefreshTokenIssue, ApiError> {
+    async fn issue_refresh_token(
+        &self,
+        executor: &mut dyn Executor,
+        user_id: Uuid,
+    ) -> Result<RefreshTokenIssue, ApiError> {
         let id = Uuid::now_v7();
         let now = Utc::now();
         let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
-        let mut db = self.db.handle()?;
         let record = toasty::create!(UserRefreshTokenRecord {
             id,
             user_id,
@@ -471,7 +463,7 @@ impl AuthService {
             expires_at: expires_at.to_rfc3339(),
             revoked_at: None,
         })
-        .exec(&mut db)
+        .exec(executor)
         .await
         .map_err(map_toasty_error)?;
         let raw_token = self.sign_refresh_token(id, user_id, now, expires_at)?;
