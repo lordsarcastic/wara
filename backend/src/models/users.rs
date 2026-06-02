@@ -123,6 +123,22 @@ pub struct UserApiTokenRecord {
     pub last_used_at: Option<String>,
 }
 
+#[derive(Debug, Clone, toasty::Model)]
+pub struct UserRefreshTokenRecord {
+    #[key]
+    pub id: Uuid,
+    #[index]
+    pub user_id: Uuid,
+    #[unique]
+    pub token_hash: String,
+    pub token_prefix: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
+    pub replaced_by_token_id: Option<String>,
+    pub last_used_at: Option<String>,
+}
+
 impl From<UserRecord> for User {
     fn from(record: UserRecord) -> Self {
         Self {

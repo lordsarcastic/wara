@@ -22,8 +22,8 @@ use crate::{
     libs::{config::Config, db::Database},
     models::{
         users::{
-            Role, User, UserApiTokenRecord, UserInviteRecord, UserRecord, UserStatus,
-            WorkspaceUserRoleRecord,
+            Role, User, UserApiTokenRecord, UserInviteRecord, UserRecord, UserRefreshTokenRecord,
+            UserStatus, WorkspaceUserRoleRecord,
         },
         workspaces::Workspace,
     },
@@ -39,6 +39,7 @@ pub struct LoginInput {
 #[derive(Debug, Clone)]
 pub struct LoginOutput {
     pub token: String,
+    pub refresh_token: String,
     pub user: User,
 }
 
@@ -62,6 +63,16 @@ pub struct InviteUserOutput {
 pub struct AcceptInviteInput {
     pub token: String,
     pub password: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RefreshSessionInput {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogoutInput {
+    pub refresh_token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -134,7 +145,12 @@ impl AuthService {
         verify_password(&input.password, &user_record.password_hash)?;
         let user = self.user_from_record(user_record).await?;
         let token = self.sign_access_token(&user)?;
-        Ok(LoginOutput { token, user })
+        let refresh_token = self.create_refresh_token(user.id).await?;
+        Ok(LoginOutput {
+            token,
+            refresh_token,
+            user,
+        })
     }
 
     pub async fn invite_user(&self, input: InviteUserInput) -> Result<InviteUserOutput, ApiError> {
@@ -244,7 +260,83 @@ impl AuthService {
 
         let user = self.get_user(invite.user_id).await?;
         let token = self.sign_access_token(&user)?;
-        Ok(LoginOutput { token, user })
+        let refresh_token = self.create_refresh_token(user.id).await?;
+        Ok(LoginOutput {
+            token,
+            refresh_token,
+            user,
+        })
+    }
+
+    pub async fn refresh_session(
+        &self,
+        input: RefreshSessionInput,
+    ) -> Result<LoginOutput, ApiError> {
+        let record = self
+            .active_refresh_token_record(&input.refresh_token)
+            .await?;
+        let user_record = self.get_user_record(record.user_id).await?;
+        if user_record.status != UserStatus::Active.as_str() {
+            return Err(ApiError::Unauthorized);
+        }
+        let user = self.user_from_record(user_record).await?;
+        let token = self.sign_access_token(&user)?;
+
+        let raw_refresh_token = generate_refresh_token();
+        let token_hash = hash_refresh_token(&raw_refresh_token);
+        let now = Utc::now();
+        let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
+
+        let mut db = self.db.handle()?;
+        let mut tx = db.transaction().await.map_err(map_toasty_error)?;
+        let new_record = toasty::create!(UserRefreshTokenRecord {
+            id: Uuid::now_v7(),
+            user_id: user.id,
+            token_hash,
+            token_prefix: token_prefix(&raw_refresh_token),
+            created_at: now.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+            revoked_at: None,
+            replaced_by_token_id: None,
+            last_used_at: None,
+        })
+        .exec(&mut tx)
+        .await
+        .map_err(map_toasty_error)?;
+
+        let mut update_old = Update::<List<UserRefreshTokenRecord>>::new(Query::<
+            List<UserRefreshTokenRecord>,
+        >::filter(
+            UserRefreshTokenRecord::fields().id().eq(record.id),
+        ));
+        update_old.set(6, now.to_rfc3339());
+        update_old.set(7, new_record.id.to_string());
+        update_old.set(8, now.to_rfc3339());
+        update_old.set_returning_none();
+        update_old.exec(&mut tx).await.map_err(map_toasty_error)?;
+        tx.commit().await.map_err(map_toasty_error)?;
+
+        Ok(LoginOutput {
+            token,
+            refresh_token: raw_refresh_token,
+            user,
+        })
+    }
+
+    pub async fn logout(&self, input: LogoutInput) -> Result<(), ApiError> {
+        let record = self
+            .active_refresh_token_record(&input.refresh_token)
+            .await?;
+        let mut db = self.db.handle()?;
+        let mut update_token = Update::<List<UserRefreshTokenRecord>>::new(Query::<
+            List<UserRefreshTokenRecord>,
+        >::filter(
+            UserRefreshTokenRecord::fields().id().eq(record.id),
+        ));
+        update_token.set(6, Utc::now().to_rfc3339());
+        update_token.set_returning_none();
+        update_token.exec(&mut db).await.map_err(map_toasty_error)?;
+        Ok(())
     }
 
     pub async fn authenticate_bearer(&self, token: &str) -> Result<User, ApiError> {
@@ -352,6 +444,56 @@ impl AuthService {
         .await
         .map_err(map_toasty_error)?
         .ok_or(ApiError::NotFound("api token"))?;
+        Ok(record)
+    }
+
+    async fn create_refresh_token(&self, user_id: Uuid) -> Result<String, ApiError> {
+        let raw_token = generate_refresh_token();
+        let now = Utc::now();
+        let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
+        let mut db = self.db.handle()?;
+        toasty::create!(UserRefreshTokenRecord {
+            id: Uuid::now_v7(),
+            user_id,
+            token_hash: hash_refresh_token(&raw_token),
+            token_prefix: token_prefix(&raw_token),
+            created_at: now.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+            revoked_at: None,
+            replaced_by_token_id: None,
+            last_used_at: None,
+        })
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?;
+        Ok(raw_token)
+    }
+
+    async fn active_refresh_token_record(
+        &self,
+        token: &str,
+    ) -> Result<UserRefreshTokenRecord, ApiError> {
+        if !token.starts_with("wara_refresh_") {
+            return Err(ApiError::Unauthorized);
+        }
+
+        let token_hash = hash_refresh_token(token);
+        let mut db = self.db.handle()?;
+        let record = Query::<List<UserRefreshTokenRecord>>::filter(
+            UserRefreshTokenRecord::fields().token_hash().eq(token_hash),
+        )
+        .first()
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?
+        .ok_or(ApiError::Unauthorized)?;
+
+        if record.revoked_at.is_some() {
+            return Err(ApiError::Unauthorized);
+        }
+        if parse_rfc3339(&record.expires_at)? <= Utc::now() {
+            return Err(ApiError::Unauthorized);
+        }
         Ok(record)
     }
 
@@ -597,11 +739,21 @@ fn generate_api_token() -> String {
     format!("wara_{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
+fn generate_refresh_token() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    format!("wara_refresh_{}", URL_SAFE_NO_PAD.encode(bytes))
+}
+
 fn hash_invite_token(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
 
 fn hash_api_token(token: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+}
+
+fn hash_refresh_token(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
 

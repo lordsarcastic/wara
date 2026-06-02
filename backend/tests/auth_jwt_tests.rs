@@ -7,7 +7,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 use wara_backend::{
     libs::{config::Config, db, docker::DeployKind},
-    models::users::{Role, UserApiTokenRecord, WorkspaceUserRoleRecord},
+    models::users::{Role, UserApiTokenRecord, UserRefreshTokenRecord, WorkspaceUserRoleRecord},
     routes,
     services::{
         app_services::{AppServiceService, CreateAppServiceInput},
@@ -85,6 +85,246 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
         .await
         .unwrap();
     assert_eq!(tampered_response.status(), StatusCode::UNAUTHORIZED);
+
+    drop_isolated_database(&test_database_url).await;
+}
+
+#[tokio::test]
+async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
+    let Some(database_url) = Config::from_env().test_database_url else {
+        eprintln!("skipping Toasty integration test; set WARA_TEST_DATABASE_URL to run it");
+        return;
+    };
+
+    let test_database_url = create_isolated_database(&database_url).await;
+    let mut config = Config::from_env();
+    config.database_url = test_database_url.clone();
+    config.db_push_schema = true;
+    config.bootstrap_admin_email = "refresh-admin@wara.local".to_string();
+    config.bootstrap_admin_password = "correct-password".to_string();
+    config.bootstrap_admin_name = "Refresh Admin".to_string();
+
+    let database = db::connect(&config).await.expect("connect test database");
+    AuthService::new(database.clone(), config.clone())
+        .bootstrap_admin()
+        .await
+        .expect("bootstrap admin");
+    let app = routes::router(AppState::new(config, database.clone()));
+
+    let first_login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"email":"refresh-admin@wara.local","password":"correct-password"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_login.status(), StatusCode::OK);
+    let first_login_body = response_json(first_login).await;
+    let user_id = Uuid::parse_str(
+        first_login_body["user"]["id"]
+            .as_str()
+            .expect("login user id"),
+    )
+    .expect("parse user id");
+    let expired_refresh_token = first_login_body["refresh_token"]
+        .as_str()
+        .expect("refresh token")
+        .to_string();
+    assert!(expired_refresh_token.starts_with("wara_refresh_"));
+
+    let mut db_handle = database.handle().expect("database handle");
+    let issued_records = toasty::stmt::Query::<toasty::stmt::List<UserRefreshTokenRecord>>::filter(
+        UserRefreshTokenRecord::fields().user_id().eq(user_id),
+    )
+    .exec(&mut db_handle)
+    .await
+    .expect("list refresh token records");
+    assert_eq!(issued_records.len(), 1);
+    assert_eq!(
+        issued_records[0].token_prefix,
+        expired_refresh_token.chars().take(12).collect::<String>()
+    );
+    assert_ne!(issued_records[0].token_hash, expired_refresh_token);
+    assert!(
+        !issued_records[0]
+            .token_hash
+            .contains(&expired_refresh_token),
+        "plaintext refresh token must not be stored"
+    );
+
+    let mut expire_token = toasty::stmt::Update::<toasty::stmt::List<UserRefreshTokenRecord>>::new(
+        toasty::stmt::Query::<toasty::stmt::List<UserRefreshTokenRecord>>::filter(
+            UserRefreshTokenRecord::fields()
+                .id()
+                .eq(issued_records[0].id),
+        ),
+    );
+    expire_token.set(5, chrono::Utc::now().to_rfc3339());
+    expire_token.set_returning_none();
+    expire_token
+        .exec(&mut db_handle)
+        .await
+        .expect("expire refresh token");
+
+    let expired_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{expired_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(expired_response.status(), StatusCode::UNAUTHORIZED);
+
+    let malformed_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"refresh_token":"not-a-refresh-token"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(malformed_response.status(), StatusCode::UNAUTHORIZED);
+
+    let unknown_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"refresh_token":"wara_refresh_unknown-refresh-token"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_response.status(), StatusCode::UNAUTHORIZED);
+
+    let active_refresh_token = login_response(&app, "refresh-admin@wara.local", "correct-password")
+        .await["refresh_token"]
+        .as_str()
+        .expect("active refresh token")
+        .to_string();
+
+    let refresh_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{active_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refresh_response.status(), StatusCode::OK);
+    let refresh_body = response_json(refresh_response).await;
+    let rotated_access_token = refresh_body["token"]
+        .as_str()
+        .expect("rotated access token");
+    let rotated_refresh_token = refresh_body["refresh_token"]
+        .as_str()
+        .expect("rotated refresh token")
+        .to_string();
+    assert_eq!(rotated_access_token.split('.').count(), 3);
+    assert_ne!(active_refresh_token, rotated_refresh_token);
+    assert!(
+        !refresh_body.to_string().contains(&active_refresh_token),
+        "refresh response must not return the old plaintext refresh token"
+    );
+
+    let records = toasty::stmt::Query::<toasty::stmt::List<UserRefreshTokenRecord>>::filter(
+        UserRefreshTokenRecord::fields().user_id().eq(user_id),
+    )
+    .exec(&mut db_handle)
+    .await
+    .expect("list rotated refresh token records");
+    let revoked_old = records
+        .iter()
+        .find(|record| {
+            record.token_prefix == active_refresh_token.chars().take(12).collect::<String>()
+        })
+        .expect("old refresh token record");
+    assert!(revoked_old.revoked_at.is_some());
+    assert!(revoked_old.replaced_by_token_id.is_some());
+    assert!(revoked_old.last_used_at.is_some());
+    let active_new = records
+        .iter()
+        .find(|record| {
+            record.token_prefix == rotated_refresh_token.chars().take(12).collect::<String>()
+        })
+        .expect("rotated refresh token record");
+    assert!(active_new.revoked_at.is_none());
+    assert_ne!(active_new.token_hash, rotated_refresh_token);
+
+    let reused_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{active_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reused_response.status(), StatusCode::UNAUTHORIZED);
+
+    let logout_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{rotated_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout_response.status(), StatusCode::NO_CONTENT);
+
+    let revoked_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{rotated_refresh_token}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked_response.status(), StatusCode::UNAUTHORIZED);
 
     drop_isolated_database(&test_database_url).await;
 }
@@ -765,6 +1005,13 @@ async fn response_json(response: axum::response::Response) -> Value {
 }
 
 async fn login(app: &axum::Router, email: &str, password: &str) -> String {
+    login_response(app, email, password).await["token"]
+        .as_str()
+        .expect("login token")
+        .to_string()
+}
+
+async fn login_response(app: &axum::Router, email: &str, password: &str) -> Value {
     let response = app
         .clone()
         .oneshot(
@@ -780,10 +1027,7 @@ async fn login(app: &axum::Router, email: &str, password: &str) -> String {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    response_json(response).await["token"]
-        .as_str()
-        .expect("login token")
-        .to_string()
+    response_json(response).await
 }
 
 async fn invite_accept_and_token(

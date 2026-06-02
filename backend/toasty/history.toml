@@ -14,3 +14,8 @@ snapshot_name = "0001_snapshot.toml"
 id = 4264434920377417443
 name = "0002_api_tokens.sql"
 snapshot_name = "0002_snapshot.toml"
+
+[[migrations]]
+id = 4264434920377417444
+name = "0003_refresh_tokens.sql"
+snapshot_name = "0003_snapshot.toml"
