@@ -3,15 +3,16 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/generate-jwt-keypair.sh [key-id] [output-dir]
+Usage: scripts/generate-jwt-keypair.sh [key-id-uuid] [output-dir]
 
 Generates an RSA JWT signing keypair and writes:
   private.pem          Secret signing key. Store in deployment secrets.
-  public.pem           Public verification key.
+  public.pem           Public verification key used only as seed material.
   env.snippet          Environment-variable snippet for secret managers.
   config.snippet.yml   ~/.wara/config.yml snippet.
 
-The script does not print private key material to stdout.
+The script does not print private key material to stdout. If no key id is
+provided, a UUIDv7 key id is generated.
 USAGE
 }
 
@@ -29,15 +30,33 @@ command -v python3 >/dev/null 2>&1 || {
   exit 1
 }
 
-key_id="${1:-jwt-$(date -u +%Y%m%d%H%M%S)}"
+default_key_id="$(
+  python3 - <<'PY'
+import os
+import random
+import time
+import uuid
+
+timestamp_ms = int(time.time() * 1000) & ((1 << 48) - 1)
+random_bits = int.from_bytes(os.urandom(10), "big") & ((1 << 74) - 1)
+value = (timestamp_ms << 80) | (0x7 << 76) | random_bits
+value &= ~(0b11 << 62)
+value |= 0b10 << 62
+print(uuid.UUID(int=value))
+PY
+)"
+key_id="${1:-$default_key_id}"
 output_dir="${2:-jwt-key-${key_id}}"
 
-case "$key_id" in
-  *[!A-Za-z0-9._-]* | "")
-    echo "key-id must contain only letters, numbers, dot, underscore, or dash" >&2
-    exit 1
-    ;;
-esac
+python3 - "$key_id" <<'PY'
+import sys
+import uuid
+
+try:
+    uuid.UUID(sys.argv[1])
+except ValueError:
+    raise SystemExit("key-id must be a UUID")
+PY
 
 umask 077
 mkdir -p "$output_dir"
@@ -107,4 +126,5 @@ Public key:
   $public_key_path
 
 Store the private key and snippets in your deployment secret manager.
+The backend stores the public key as JWK components, not PEM, at startup.
 EOF

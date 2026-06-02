@@ -4,6 +4,7 @@ use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, get_current_timestamp,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use uuid::Uuid;
 
 use crate::libs::docker::{DEFAULT_DOCKERFILE_CONTEXT_DIR, DEFAULT_REMOTE_SERVICES_ROOT};
 
@@ -45,7 +46,7 @@ CANrHvQYI4/gmhRTv53ypyFRWA0sN4FKbEazCSP1dZFV07GCAAR/hTy+xOudgde9
 +QIDAQAB
 -----END PUBLIC KEY-----"#;
 
-pub const DEFAULT_JWT_ACTIVE_KEY_ID: &str = "default";
+pub const DEFAULT_JWT_ACTIVE_KEY_ID: &str = "01973571-7a80-7000-8000-000000000001";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JwtVerificationKeyConfig {
@@ -370,6 +371,8 @@ impl Config {
         if active_key_id.is_empty() {
             anyhow::bail!("WARA_JWT_ACTIVE_KEY_ID must not be empty");
         }
+        Uuid::parse_str(active_key_id)
+            .map_err(|error| anyhow::anyhow!("WARA_JWT_ACTIVE_KEY_ID must be a UUID: {error}"))?;
         if self.jwt_private_key_pem.trim().is_empty() {
             anyhow::bail!("WARA_JWT_PRIVATE_KEY_PEM must not be empty");
         }
@@ -387,6 +390,9 @@ impl Config {
             if key_id.is_empty() {
                 anyhow::bail!("JWT public verification key id must not be empty");
             }
+            Uuid::parse_str(key_id).map_err(|error| {
+                anyhow::anyhow!("JWT public verification key id {key_id} must be a UUID: {error}")
+            })?;
             if !seen.insert(key_id.to_string()) {
                 anyhow::bail!("duplicate JWT public verification key id: {key_id}");
             }
@@ -695,11 +701,11 @@ tQIDAQAB
         let config = Config::from_sources(ConfigFile {
             jwt_public_keys: Some(vec![
                 JwtVerificationKeyConfig {
-                    id: "default".to_string(),
+                    id: DEFAULT_JWT_ACTIVE_KEY_ID.to_string(),
                     public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
                 },
                 JwtVerificationKeyConfig {
-                    id: "default".to_string(),
+                    id: DEFAULT_JWT_ACTIVE_KEY_ID.to_string(),
                     public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
                 },
             ]),
@@ -714,10 +720,12 @@ tQIDAQAB
 
     #[test]
     fn missing_active_jwt_public_key_is_rejected() {
+        let active_key_id = "01973571-7a80-7000-8000-000000000010";
+        let old_key_id = "01973571-7a80-7000-8000-000000000011";
         let config = Config::from_sources(ConfigFile {
-            jwt_active_key_id: Some("active".to_string()),
+            jwt_active_key_id: Some(active_key_id.to_string()),
             jwt_public_keys: Some(vec![JwtVerificationKeyConfig {
-                id: "old".to_string(),
+                id: old_key_id.to_string(),
                 public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
             }]),
             ..ConfigFile::default()
@@ -729,15 +737,32 @@ tQIDAQAB
         assert!(
             error
                 .to_string()
-                .contains("active JWT signing key id active")
+                .contains(&format!("active JWT signing key id {active_key_id}"))
         );
+    }
+
+    #[test]
+    fn non_uuid_jwt_key_ids_are_rejected() {
+        let config = Config::from_sources(ConfigFile {
+            jwt_active_key_id: Some("active".to_string()),
+            jwt_public_keys: Some(vec![JwtVerificationKeyConfig {
+                id: "active".to_string(),
+                public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
+            }]),
+            ..ConfigFile::default()
+        });
+
+        let error = config
+            .validate_jwt_key_config()
+            .expect_err("non-UUID JWT key ids should fail");
+        assert!(error.to_string().contains("must be a UUID"));
     }
 
     #[test]
     fn malformed_jwt_public_key_is_rejected() {
         let config = Config::from_sources(ConfigFile {
             jwt_public_keys: Some(vec![JwtVerificationKeyConfig {
-                id: "default".to_string(),
+                id: DEFAULT_JWT_ACTIVE_KEY_ID.to_string(),
                 public_key_pem: "not a public key".to_string(),
             }]),
             ..ConfigFile::default()
@@ -753,7 +778,7 @@ tQIDAQAB
     fn mismatched_active_jwt_key_material_is_rejected() {
         let config = Config::from_sources(ConfigFile {
             jwt_public_keys: Some(vec![JwtVerificationKeyConfig {
-                id: "default".to_string(),
+                id: DEFAULT_JWT_ACTIVE_KEY_ID.to_string(),
                 public_key_pem: OTHER_PUBLIC_KEY_PEM.to_string(),
             }]),
             ..ConfigFile::default()

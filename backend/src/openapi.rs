@@ -4,6 +4,7 @@ use utoipa::OpenApi;
 #[openapi(
     paths(
         crate::routes::health,
+        crate::routes::well_known::jwks,
         crate::routes::auth::login,
         crate::routes::auth::refresh_session,
         crate::routes::auth::logout,
@@ -51,6 +52,8 @@ use utoipa::OpenApi;
             crate::models::users::Role,
             crate::models::users::WorkspaceRole,
             crate::models::users::UserStatus,
+            crate::models::users::JwtPublicKey,
+            crate::models::users::Jwks,
             crate::models::servers::Server,
             crate::models::workspaces::Workspace,
             crate::models::environments::Environment,

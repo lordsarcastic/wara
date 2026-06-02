@@ -134,6 +134,48 @@ pub struct UserRefreshTokenRecord {
     pub revoked_at: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct JwtPublicKey {
+    pub kty: String,
+    #[serde(rename = "use")]
+    pub key_use: String,
+    pub alg: String,
+    pub kid: String,
+    pub n: String,
+    pub e: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct Jwks {
+    pub keys: Vec<JwtPublicKey>,
+}
+
+#[derive(Debug, Clone, toasty::Model)]
+pub struct JwtPublicKeyRecord {
+    #[key]
+    pub id: Uuid,
+    pub key_type: String,
+    pub key_use: String,
+    pub algorithm: String,
+    pub modulus: String,
+    pub exponent: String,
+    pub created_at: String,
+    pub revoked_at: Option<String>,
+}
+
+impl From<JwtPublicKeyRecord> for JwtPublicKey {
+    fn from(record: JwtPublicKeyRecord) -> Self {
+        Self {
+            kty: record.key_type,
+            key_use: record.key_use,
+            alg: record.algorithm,
+            kid: record.id.to_string(),
+            n: record.modulus,
+            e: record.exponent,
+        }
+    }
+}
+
 impl From<UserRecord> for User {
     fn from(record: UserRecord) -> Self {
         Self {

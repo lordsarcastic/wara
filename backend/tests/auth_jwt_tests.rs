@@ -25,6 +25,10 @@ use wara_backend::{
     state::AppState,
 };
 
+const OLD_JWT_KEY_ID: &str = "01973571-7a80-7000-8000-000000000002";
+const UNKNOWN_JWT_KEY_ID: &str = "01973571-7a80-7000-8000-000000000003";
+const MISSING_JWT_KEY_ID: &str = "01973571-7a80-7000-8000-000000000004";
+
 #[derive(Debug, Serialize, Deserialize)]
 struct TestClaims {
     jti: String,
@@ -65,7 +69,7 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     config.bootstrap_admin_name = "Auth Admin".to_string();
     config.jwt_public_keys = vec![
         JwtVerificationKeyConfig {
-            id: "old".to_string(),
+            id: OLD_JWT_KEY_ID.to_string(),
             public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
         },
         JwtVerificationKeyConfig {
@@ -117,6 +121,29 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     assert!(claims.exp > claims.iat);
     assert!(Uuid::parse_str(&claims.ret).is_ok());
 
+    let jwks_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/jwks.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(jwks_response.status(), StatusCode::OK);
+    let jwks_body = response_json(jwks_response).await;
+    let keys = jwks_body["keys"].as_array().expect("jwks keys");
+    let active_key = keys
+        .iter()
+        .find(|key| key["kid"] == config.jwt_active_key_id)
+        .expect("active key in jwks");
+    assert_eq!(active_key["kty"], "RSA");
+    assert_eq!(active_key["use"], "sig");
+    assert_eq!(active_key["alg"], "RS256");
+    assert!(active_key["n"].as_str().expect("modulus").len() > 100);
+    assert_eq!(active_key["e"], "AQAB");
+
     let me_response = app
         .clone()
         .oneshot(
@@ -136,7 +163,7 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
 
     let old_key_token = sign_test_jwt(
         &config,
-        "old",
+        OLD_JWT_KEY_ID,
         user_id,
         "admin-auth@wara.local",
         "super_admin",
@@ -157,7 +184,7 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
 
     let unknown_key_token = sign_test_jwt(
         &config,
-        "unknown",
+        UNKNOWN_JWT_KEY_ID,
         user_id,
         "admin-auth@wara.local",
         "super_admin",
@@ -178,7 +205,7 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
 
     let missing_key_id_token = sign_test_jwt(
         &config,
-        "missing",
+        MISSING_JWT_KEY_ID,
         user_id,
         "admin-auth@wara.local",
         "super_admin",
@@ -1190,7 +1217,9 @@ fn sign_unknown_refresh_token(config: &Config, user_id: Uuid) -> String {
     };
     let key = EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
         .expect("test private key should parse");
-    encode(&Header::new(Algorithm::RS256), &claims, &key).expect("sign refresh token")
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(config.jwt_active_key_id.clone());
+    encode(&header, &claims, &key).expect("sign refresh token")
 }
 
 fn sign_test_jwt(
