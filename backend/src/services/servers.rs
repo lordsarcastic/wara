@@ -1,4 +1,7 @@
-use toasty::stmt::{List, Query};
+use chrono::Utc;
+use serde::Serialize;
+use toasty::stmt::{List, Query, Update};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
@@ -22,6 +25,16 @@ pub struct CreateServerInput {
     pub private_key: String,
     pub private_key_passphrase: Option<String>,
     pub default_proxy: Option<ProxyKind>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ServerCheckResponse {
+    pub server_id: Uuid,
+    pub ssh_status: String,
+    pub docker_status: String,
+    pub docker_version: Option<String>,
+    pub checked_at: String,
+    pub error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -67,6 +80,9 @@ impl ServerService {
                 .as_str()
                 .to_string(),
             docker_status: "unchecked".to_string(),
+            docker_version: String::new(),
+            last_check_at: String::new(),
+            last_check_error: String::new(),
         })
         .exec(&mut db)
         .await
@@ -82,6 +98,52 @@ impl ServerService {
             .await
             .map_err(map_toasty_error)?;
         record.map(Server::from).ok_or(ApiError::NotFound("server"))
+    }
+
+    pub async fn check_server(&self, id: Uuid) -> Result<ServerCheckResponse, ApiError> {
+        let server = self.get_server(id).await?;
+        let target = self.ssh_target(&server)?;
+        let checked_at = Utc::now().to_rfc3339();
+        let commands = ssh::server_check_commands();
+
+        let (docker_status, docker_version, last_check_error) =
+            match ssh::run_controlled_commands(&target, &commands).await {
+                Ok(output) => match ssh::parse_server_check_output(&output) {
+                    Ok(version) => ("available".to_string(), version, String::new()),
+                    Err(error) => (
+                        "unavailable".to_string(),
+                        String::new(),
+                        ssh::redact_error(&error.to_string(), &target),
+                    ),
+                },
+                Err(error) => (
+                    "unavailable".to_string(),
+                    String::new(),
+                    ssh::redact_error(&error.to_string(), &target),
+                ),
+            };
+
+        self.update_check_metadata(
+            id,
+            &docker_status,
+            &docker_version,
+            &checked_at,
+            &last_check_error,
+        )
+        .await?;
+
+        Ok(ServerCheckResponse {
+            server_id: id,
+            ssh_status: if docker_status == "available" {
+                "connected".to_string()
+            } else {
+                "failed".to_string()
+            },
+            docker_status,
+            docker_version: non_empty(docker_version),
+            checked_at,
+            error: non_empty(last_check_error),
+        })
     }
 
     pub fn ssh_target(&self, server: &Server) -> Result<SshTarget, ApiError> {
@@ -107,6 +169,30 @@ impl ServerService {
                 .transpose()?,
         })
     }
+
+    async fn update_check_metadata(
+        &self,
+        id: Uuid,
+        docker_status: &str,
+        docker_version: &str,
+        checked_at: &str,
+        last_check_error: &str,
+    ) -> Result<(), ApiError> {
+        let mut db = self.db.handle()?;
+        let mut update_server = Update::<List<ServerRecord>>::new(
+            Query::<List<ServerRecord>>::filter(ServerRecord::fields().id().eq(id)),
+        );
+        update_server.set(10, docker_status);
+        update_server.set(11, docker_version);
+        update_server.set(12, checked_at);
+        update_server.set(13, last_check_error);
+        update_server.set_returning_none();
+        update_server
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
+        Ok(())
+    }
 }
 
 fn validate_ssh_key_pair(payload: &CreateServerInput) -> Result<(), ApiError> {
@@ -125,4 +211,8 @@ fn validate_ssh_key_pair(payload: &CreateServerInput) -> Result<(), ApiError> {
 
 fn map_toasty_error(error: toasty::Error) -> ApiError {
     ApiError::Internal(format!("database operation failed: {error}"))
+}
+
+fn non_empty(value: String) -> Option<String> {
+    if value.is_empty() { None } else { Some(value) }
 }
