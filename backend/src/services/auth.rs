@@ -21,7 +21,10 @@ use crate::{
     errors::ApiError,
     libs::{config::Config, db::Database},
     models::{
-        users::{Role, User, UserInviteRecord, UserRecord, UserStatus, WorkspaceUserRoleRecord},
+        users::{
+            Role, User, UserApiTokenRecord, UserInviteRecord, UserRecord, UserStatus,
+            WorkspaceUserRoleRecord,
+        },
         workspaces::Workspace,
     },
     state::AppState,
@@ -59,6 +62,18 @@ pub struct InviteUserOutput {
 pub struct AcceptInviteInput {
     pub token: String,
     pub password: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateApiTokenInput {
+    pub user: User,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateApiTokenOutput {
+    pub token: String,
+    pub api_token: UserApiTokenRecord,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -233,9 +248,14 @@ impl AuthService {
     }
 
     pub async fn authenticate_bearer(&self, token: &str) -> Result<User, ApiError> {
-        let claims = self.verify_access_token(token)?;
-        let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
-        self.get_user(user_id).await
+        match self.verify_access_token(token) {
+            Ok(claims) => {
+                let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+                self.get_user(user_id).await
+            }
+            Err(ApiError::Unauthorized) => self.authenticate_api_token(token).await,
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn list_users(&self) -> Result<Vec<User>, ApiError> {
@@ -249,6 +269,90 @@ impl AuthService {
             users.push(self.user_from_record(record).await?);
         }
         Ok(users)
+    }
+
+    pub async fn create_api_token(
+        &self,
+        input: CreateApiTokenInput,
+    ) -> Result<CreateApiTokenOutput, ApiError> {
+        let raw_token = generate_api_token();
+        let token_hash = hash_api_token(&raw_token);
+        let token_prefix = token_prefix(&raw_token);
+        let now = Utc::now().to_rfc3339();
+
+        let mut db = self.db.handle()?;
+        let record = toasty::create!(UserApiTokenRecord {
+            id: Uuid::now_v7(),
+            user_id: input.user.id,
+            name: input.name,
+            token_hash,
+            token_prefix,
+            created_at: now,
+            revoked_at: None,
+            last_used_at: None,
+        })
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?;
+
+        Ok(CreateApiTokenOutput {
+            token: raw_token,
+            api_token: record,
+        })
+    }
+
+    pub async fn list_api_tokens(&self, user: &User) -> Result<Vec<UserApiTokenRecord>, ApiError> {
+        let mut db = self.db.handle()?;
+        let mut records = Query::<List<UserApiTokenRecord>>::filter(
+            UserApiTokenRecord::fields().user_id().eq(user.id),
+        )
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?;
+
+        records.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(records)
+    }
+
+    pub async fn revoke_api_token(
+        &self,
+        user: &User,
+        token_id: Uuid,
+    ) -> Result<UserApiTokenRecord, ApiError> {
+        let mut db = self.db.handle()?;
+        let record = Query::<List<UserApiTokenRecord>>::filter(
+            UserApiTokenRecord::fields().id().eq(token_id),
+        )
+        .first()
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?
+        .ok_or(ApiError::NotFound("api token"))?;
+        if record.user_id != user.id {
+            return Err(ApiError::NotFound("api token"));
+        }
+
+        let revoked_at = record
+            .revoked_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let mut update_token =
+            Update::<List<UserApiTokenRecord>>::new(Query::<List<UserApiTokenRecord>>::filter(
+                UserApiTokenRecord::fields().id().eq(token_id),
+            ));
+        update_token.set(6, revoked_at);
+        update_token.set_returning_none();
+        update_token.exec(&mut db).await.map_err(map_toasty_error)?;
+
+        let record = Query::<List<UserApiTokenRecord>>::filter(
+            UserApiTokenRecord::fields().id().eq(token_id),
+        )
+        .first()
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?
+        .ok_or(ApiError::NotFound("api token"))?;
+        Ok(record)
     }
 
     async fn get_user(&self, id: Uuid) -> Result<User, ApiError> {
@@ -292,6 +396,41 @@ impl AuthService {
         .map_err(map_toasty_error)?;
         user.workspace_roles = roles.into_iter().map(Into::into).collect();
         Ok(user)
+    }
+
+    async fn authenticate_api_token(&self, token: &str) -> Result<User, ApiError> {
+        if !token.starts_with("wara_") {
+            return Err(ApiError::Unauthorized);
+        }
+
+        let token_hash = hash_api_token(token);
+        let mut db = self.db.handle()?;
+        let record = Query::<List<UserApiTokenRecord>>::filter(
+            UserApiTokenRecord::fields().token_hash().eq(token_hash),
+        )
+        .first()
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?
+        .ok_or(ApiError::Unauthorized)?;
+        if record.revoked_at.is_some() {
+            return Err(ApiError::Unauthorized);
+        }
+
+        let user_record = self.get_user_record(record.user_id).await?;
+        if user_record.status != UserStatus::Active.as_str() {
+            return Err(ApiError::Unauthorized);
+        }
+
+        let mut update_token =
+            Update::<List<UserApiTokenRecord>>::new(Query::<List<UserApiTokenRecord>>::filter(
+                UserApiTokenRecord::fields().id().eq(record.id),
+            ));
+        update_token.set(7, Utc::now().to_rfc3339());
+        update_token.set_returning_none();
+        update_token.exec(&mut db).await.map_err(map_toasty_error)?;
+
+        self.user_from_record(user_record).await
     }
 
     async fn find_user_by_email(&self, email: &str) -> Result<UserRecord, ApiError> {
@@ -452,8 +591,22 @@ fn generate_invite_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+fn generate_api_token() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    format!("wara_{}", URL_SAFE_NO_PAD.encode(bytes))
+}
+
 fn hash_invite_token(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+}
+
+fn hash_api_token(token: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+}
+
+fn token_prefix(token: &str) -> String {
+    token.chars().take(12).collect()
 }
 
 fn invite_link(app_base_url: &str, token: &str) -> String {

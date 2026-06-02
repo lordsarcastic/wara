@@ -3,7 +3,10 @@ use std::process::Command;
 use uuid::Uuid;
 use wara_backend::{
     libs::{config::Config, db},
-    services::workspaces::WorkspaceService,
+    services::{
+        auth::{AuthService, CreateApiTokenInput},
+        workspaces::WorkspaceService,
+    },
 };
 
 /// Run the real `wara-migrate` binary against `database_url`. Cargo exposes the
@@ -42,10 +45,12 @@ async fn migration_apply_initializes_a_fresh_database() {
     let mut config = Config::from_env();
     config.database_url = test_database_url.clone();
     config.db_push_schema = false;
+    let bootstrap_email = config.bootstrap_admin_email.clone();
+    let bootstrap_password = config.bootstrap_admin_password.clone();
     let database = db::connect(&config)
         .await
         .expect("connect to migrated database");
-    let workspace_service = WorkspaceService::new(database);
+    let workspace_service = WorkspaceService::new(database.clone());
     let workspace = workspace_service
         .create_workspace(
             format!("migration-check-{}", Uuid::now_v7().simple()),
@@ -61,6 +66,31 @@ async fn migration_apply_initializes_a_fresh_database() {
         !environments.is_empty(),
         "workspace creation should seed a default environment"
     );
+    let auth_service = AuthService::new(database, config);
+    auth_service
+        .bootstrap_admin()
+        .await
+        .expect("bootstrap admin on migrated schema");
+    let login = auth_service
+        .login(wara_backend::services::auth::LoginInput {
+            email: bootstrap_email,
+            password: bootstrap_password,
+        })
+        .await
+        .expect("login on migrated schema");
+    let created_token = auth_service
+        .create_api_token(CreateApiTokenInput {
+            user: login.user.clone(),
+            name: "migration token".to_string(),
+        })
+        .await
+        .expect("create api token on migrated schema");
+    assert!(created_token.token.starts_with("wara_"));
+    let api_tokens = auth_service
+        .list_api_tokens(&login.user)
+        .await
+        .expect("list api tokens on migrated schema");
+    assert_eq!(api_tokens.len(), 1);
 
     // Re-applying is idempotent.
     let output = run_migrate(&test_database_url, &["migration", "apply"]);

@@ -7,7 +7,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 use wara_backend::{
     libs::{config::Config, db, docker::DeployKind},
-    models::users::{Role, WorkspaceUserRoleRecord},
+    models::users::{Role, UserApiTokenRecord, WorkspaceUserRoleRecord},
     routes,
     services::{
         app_services::{AppServiceService, CreateAppServiceInput},
@@ -85,6 +85,206 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
         .await
         .unwrap();
     assert_eq!(tampered_response.status(), StatusCode::UNAUTHORIZED);
+
+    drop_isolated_database(&test_database_url).await;
+}
+
+#[tokio::test]
+async fn api_tokens_are_shown_once_hashed_revocable_and_authorized_like_users() {
+    let Some(database_url) = Config::from_env().test_database_url else {
+        eprintln!("skipping Toasty integration test; set WARA_TEST_DATABASE_URL to run it");
+        return;
+    };
+
+    let test_database_url = create_isolated_database(&database_url).await;
+    let mut config = Config::from_env();
+    config.database_url = test_database_url.clone();
+    config.db_push_schema = true;
+    config.bootstrap_admin_email = "api-token-admin@wara.local".to_string();
+    config.bootstrap_admin_password = "correct-password".to_string();
+    config.bootstrap_admin_name = "API Token Admin".to_string();
+    config.app_base_url = "http://localhost:4200".to_string();
+
+    let database = db::connect(&config).await.expect("connect test database");
+    AuthService::new(database.clone(), config.clone())
+        .bootstrap_admin()
+        .await
+        .expect("bootstrap admin");
+    let workspace_service = WorkspaceService::new(database.clone());
+    let workspace = workspace_service
+        .create_workspace("API token workspace".to_string(), None)
+        .await
+        .expect("create workspace");
+    let other_workspace = workspace_service
+        .create_workspace("Other API token workspace".to_string(), None)
+        .await
+        .expect("create other workspace");
+    let app = routes::router(AppState::new(config, database.clone()));
+
+    let root_token = login(&app, "api-token-admin@wara.local", "correct-password").await;
+    let viewer_jwt = invite_accept_and_token(
+        &app,
+        &root_token,
+        workspace.id,
+        "api-token-viewer@wara.local",
+        Role::Viewer,
+    )
+    .await;
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/api-tokens")
+                .header("authorization", format!("Bearer {viewer_jwt}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Local automation"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let create_body = response_json(create_response).await;
+    let api_token = create_body["token"]
+        .as_str()
+        .expect("plaintext api token")
+        .to_string();
+    assert!(api_token.starts_with("wara_"));
+    assert_eq!(create_body["api_token"]["name"], "Local automation");
+    assert_eq!(
+        create_body["api_token"]["token_prefix"],
+        api_token.chars().take(12).collect::<String>()
+    );
+    assert!(create_body["api_token"].get("token").is_none());
+    let token_id = Uuid::parse_str(
+        create_body["api_token"]["id"]
+            .as_str()
+            .expect("api token id"),
+    )
+    .expect("parse api token id");
+
+    let mut db_handle = database.handle().expect("database handle");
+    let records = toasty::stmt::Query::<toasty::stmt::List<UserApiTokenRecord>>::filter(
+        UserApiTokenRecord::fields().id().eq(token_id),
+    )
+    .exec(&mut db_handle)
+    .await
+    .expect("list api token records");
+    assert_eq!(records.len(), 1);
+    assert_ne!(records[0].token_hash, api_token);
+    assert!(
+        !records[0].token_hash.contains(&api_token),
+        "plaintext token must not be stored"
+    );
+
+    let me_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", format!("Bearer {api_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(me_response.status(), StatusCode::OK);
+    let me_body = response_json(me_response).await;
+    assert_eq!(me_body["email"], "api-token-viewer@wara.local");
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/api-tokens")
+                .header("authorization", format!("Bearer {api_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = response_json(list_response).await;
+    assert_eq!(list_body.as_array().expect("token list").len(), 1);
+    assert_eq!(list_body[0]["id"], token_id.to_string());
+    assert_eq!(list_body[0]["name"], "Local automation");
+    assert!(
+        !list_body.to_string().contains(&api_token),
+        "list response must not include plaintext token"
+    );
+
+    let forbidden_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/workspaces/{}", other_workspace.id))
+                .header("authorization", format!("Bearer {api_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden_response.status(), StatusCode::FORBIDDEN);
+
+    let malformed_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", "Bearer not-an-api-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(malformed_response.status(), StatusCode::UNAUTHORIZED);
+
+    let unknown_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", "Bearer wara_unknown-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_response.status(), StatusCode::UNAUTHORIZED);
+
+    let revoke_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/auth/api-tokens/{token_id}"))
+                .header("authorization", format!("Bearer {api_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoke_response.status(), StatusCode::OK);
+    let revoke_body = response_json(revoke_response).await;
+    assert!(revoke_body["revoked_at"].as_str().is_some());
+    assert!(
+        !revoke_body.to_string().contains(&api_token),
+        "revoke response must not include plaintext token"
+    );
+
+    let revoked_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", format!("Bearer {api_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked_response.status(), StatusCode::UNAUTHORIZED);
 
     drop_isolated_database(&test_database_url).await;
 }
