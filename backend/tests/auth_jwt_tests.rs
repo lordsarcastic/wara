@@ -2,6 +2,8 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use serde::Deserialize;
 use serde_json::Value;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -16,6 +18,19 @@ use wara_backend::{
     },
     state::AppState,
 };
+
+#[derive(Debug, Deserialize)]
+struct TestClaims {
+    jti: String,
+    ret: String,
+    sub: String,
+    email: String,
+    role: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
 
 #[tokio::test]
 async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
@@ -37,7 +52,7 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
         .bootstrap_admin()
         .await
         .expect("bootstrap admin");
-    let app = routes::router(AppState::new(config, database));
+    let app = routes::router(AppState::new(config.clone(), database));
 
     let login_response = app
         .clone()
@@ -57,6 +72,18 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     let login_body = response_json(login_response).await;
     let token = login_body["token"].as_str().expect("jwt token");
     assert_eq!(token.split('.').count(), 3);
+    let claims = decode_access_claims(&config, token);
+    assert!(Uuid::parse_str(&claims.jti).is_ok());
+    assert_eq!(
+        claims.sub,
+        login_body["user"]["id"].as_str().expect("user id")
+    );
+    assert_eq!(claims.email, "admin-auth@wara.local");
+    assert_eq!(claims.role, "super_admin");
+    assert_eq!(claims.iss, config.jwt_issuer);
+    assert_eq!(claims.aud, config.jwt_audience);
+    assert!(claims.exp > claims.iat);
+    assert!(Uuid::parse_str(&claims.ret).is_ok());
 
     let me_response = app
         .clone()
@@ -109,7 +136,7 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
         .bootstrap_admin()
         .await
         .expect("bootstrap admin");
-    let app = routes::router(AppState::new(config, database.clone()));
+    let app = routes::router(AppState::new(config.clone(), database.clone()));
 
     let first_login = app
         .clone()
@@ -127,6 +154,7 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
         .unwrap();
     assert_eq!(first_login.status(), StatusCode::OK);
     let first_login_body = response_json(first_login).await;
+    let first_access_token = first_login_body["token"].as_str().expect("access token");
     let user_id = Uuid::parse_str(
         first_login_body["user"]["id"]
             .as_str()
@@ -158,6 +186,9 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
             .contains(&expired_refresh_token),
         "plaintext refresh token must not be stored"
     );
+    let first_claims = decode_access_claims(&config, first_access_token);
+    assert!(Uuid::parse_str(&first_claims.jti).is_ok());
+    assert_eq!(first_claims.ret, issued_records[0].id.to_string());
 
     let mut expire_token = toasty::stmt::Update::<toasty::stmt::List<UserRefreshTokenRecord>>::new(
         toasty::stmt::Query::<toasty::stmt::List<UserRefreshTokenRecord>>::filter(
@@ -219,8 +250,12 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
         .unwrap();
     assert_eq!(unknown_response.status(), StatusCode::UNAUTHORIZED);
 
-    let active_refresh_token = login_response(&app, "refresh-admin@wara.local", "correct-password")
-        .await["refresh_token"]
+    let active_login_body =
+        login_response(&app, "refresh-admin@wara.local", "correct-password").await;
+    let active_access_token = active_login_body["token"]
+        .as_str()
+        .expect("active access token");
+    let active_refresh_token = active_login_body["refresh_token"]
         .as_str()
         .expect("active refresh token")
         .to_string();
@@ -270,6 +305,8 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
     assert!(revoked_old.revoked_at.is_some());
     assert!(revoked_old.replaced_by_token_id.is_some());
     assert!(revoked_old.last_used_at.is_some());
+    let active_claims = decode_access_claims(&config, active_access_token);
+    assert_eq!(active_claims.ret, revoked_old.id.to_string());
     let active_new = records
         .iter()
         .find(|record| {
@@ -278,6 +315,10 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
         .expect("rotated refresh token record");
     assert!(active_new.revoked_at.is_none());
     assert_ne!(active_new.token_hash, rotated_refresh_token);
+    let rotated_claims = decode_access_claims(&config, rotated_access_token);
+    assert!(Uuid::parse_str(&rotated_claims.jti).is_ok());
+    assert_ne!(rotated_claims.jti, active_claims.jti);
+    assert_eq!(rotated_claims.ret, active_new.id.to_string());
 
     let reused_response = app
         .clone()
@@ -1002,6 +1043,18 @@ async fn response_json(response: axum::response::Response) -> Value {
         .await
         .expect("read response body");
     serde_json::from_slice(&bytes).expect("parse response JSON")
+}
+
+fn decode_access_claims(config: &Config, token: &str) -> TestClaims {
+    let key = DecodingKey::from_rsa_pem(config.jwt_public_key_pem.as_bytes())
+        .expect("test public key should parse");
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&[config.jwt_audience.as_str()]);
+    validation.set_issuer(&[config.jwt_issuer.as_str()]);
+    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+    decode::<TestClaims>(token, &key, &validation)
+        .expect("access token should decode")
+        .claims
 }
 
 async fn login(app: &axum::Router, email: &str, password: &str) -> String {

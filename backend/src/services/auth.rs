@@ -89,6 +89,8 @@ pub struct CreateApiTokenOutput {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
+    jti: String,
+    ret: String,
     sub: String,
     email: String,
     role: String,
@@ -96,6 +98,11 @@ struct Claims {
     aud: String,
     iat: u64,
     exp: u64,
+}
+
+struct RefreshTokenIssue {
+    token: String,
+    record: UserRefreshTokenRecord,
 }
 
 #[derive(Clone)]
@@ -144,11 +151,11 @@ impl AuthService {
         }
         verify_password(&input.password, &user_record.password_hash)?;
         let user = self.user_from_record(user_record).await?;
-        let token = self.sign_access_token(&user)?;
         let refresh_token = self.create_refresh_token(user.id).await?;
+        let token = self.sign_access_token(&user, refresh_token.record.id)?;
         Ok(LoginOutput {
             token,
-            refresh_token,
+            refresh_token: refresh_token.token,
             user,
         })
     }
@@ -259,11 +266,11 @@ impl AuthService {
             .map_err(map_toasty_error)?;
 
         let user = self.get_user(invite.user_id).await?;
-        let token = self.sign_access_token(&user)?;
         let refresh_token = self.create_refresh_token(user.id).await?;
+        let token = self.sign_access_token(&user, refresh_token.record.id)?;
         Ok(LoginOutput {
             token,
-            refresh_token,
+            refresh_token: refresh_token.token,
             user,
         })
     }
@@ -280,7 +287,6 @@ impl AuthService {
             return Err(ApiError::Unauthorized);
         }
         let user = self.user_from_record(user_record).await?;
-        let token = self.sign_access_token(&user)?;
 
         let raw_refresh_token = generate_refresh_token();
         let token_hash = hash_refresh_token(&raw_refresh_token);
@@ -316,6 +322,7 @@ impl AuthService {
         update_old.exec(&mut tx).await.map_err(map_toasty_error)?;
         tx.commit().await.map_err(map_toasty_error)?;
 
+        let token = self.sign_access_token(&user, new_record.id)?;
         Ok(LoginOutput {
             token,
             refresh_token: raw_refresh_token,
@@ -447,12 +454,12 @@ impl AuthService {
         Ok(record)
     }
 
-    async fn create_refresh_token(&self, user_id: Uuid) -> Result<String, ApiError> {
+    async fn create_refresh_token(&self, user_id: Uuid) -> Result<RefreshTokenIssue, ApiError> {
         let raw_token = generate_refresh_token();
         let now = Utc::now();
         let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
         let mut db = self.db.handle()?;
-        toasty::create!(UserRefreshTokenRecord {
+        let record = toasty::create!(UserRefreshTokenRecord {
             id: Uuid::now_v7(),
             user_id,
             token_hash: hash_refresh_token(&raw_token),
@@ -466,7 +473,10 @@ impl AuthService {
         .exec(&mut db)
         .await
         .map_err(map_toasty_error)?;
-        Ok(raw_token)
+        Ok(RefreshTokenIssue {
+            token: raw_token,
+            record,
+        })
     }
 
     async fn active_refresh_token_record(
@@ -601,9 +611,11 @@ impl AuthService {
         Ok(invite)
     }
 
-    fn sign_access_token(&self, user: &User) -> Result<String, ApiError> {
+    fn sign_access_token(&self, user: &User, refresh_token_id: Uuid) -> Result<String, ApiError> {
         let now = get_current_timestamp();
         let claims = Claims {
+            jti: Uuid::now_v7().to_string(),
+            ret: refresh_token_id.to_string(),
             sub: user.id.to_string(),
             email: user.email.clone(),
             role: user.role.as_str().to_string(),
