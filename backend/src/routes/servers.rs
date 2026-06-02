@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::get,
+    routing::{get, post},
 };
 use axum_valid::Valid;
 use serde::Deserialize;
@@ -13,8 +13,8 @@ use crate::{
     libs::docker::ProxyKind,
     models::servers::Server,
     services::{
-        auth::{CurrentUser, ensure_super_admin},
-        servers::{CreateServerInput, ServerService},
+        auth::{AdminUser, CurrentUser, ensure_super_admin},
+        servers::{CreateServerInput, ServerCheckResponse, ServerService},
     },
     state::AppState,
 };
@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/servers", get(list_servers).post(create_server))
         .route("/servers/{id}", get(get_server))
+        .route("/servers/{id}/check", post(check_server))
 }
 
 #[derive(Debug, Deserialize, ToSchema, Validate)]
@@ -82,6 +83,19 @@ pub async fn get_server(
     Ok(Json(
         ServerService::new(state.db, state.config.secret_key)
             .get_server(id)
+            .await?,
+    ))
+}
+
+#[utoipa::path(post, path = "/api/v1/servers/{id}/check", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), responses((status = 200, body = ServerCheckResponse), (status = 404, body = crate::errors::ErrorResponse)))]
+pub async fn check_server(
+    Path(id): Path<Uuid>,
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<ServerCheckResponse>, ApiError> {
+    Ok(Json(
+        ServerService::new(state.db, state.config.secret_key)
+            .check_server(id)
             .await?,
     ))
 }

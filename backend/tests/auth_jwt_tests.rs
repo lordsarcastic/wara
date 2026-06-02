@@ -10,7 +10,11 @@ use serde_json::Value;
 use tower::ServiceExt;
 use uuid::Uuid;
 use wara_backend::{
-    libs::{config::Config, db, docker::DeployKind},
+    libs::{
+        config::Config,
+        db,
+        docker::{DeployKind, ProxyKind},
+    },
     models::users::{
         JwtPublicKeyRecord, Role, UserApiTokenRecord, UserRefreshTokenRecord,
         WorkspaceUserRoleRecord,
@@ -19,6 +23,7 @@ use wara_backend::{
     services::{
         app_services::{AppServiceService, CreateAppServiceInput},
         auth::AuthService,
+        servers::{CreateServerInput, ServerService},
         workspaces::WorkspaceService,
     },
     state::AppState,
@@ -956,6 +961,95 @@ async fn platform_admins_can_manage_users_and_disabled_users_lose_access() {
     assert_eq!(role_response.status(), StatusCode::OK);
     let promoted_user = response_json(role_response).await;
     assert_eq!(promoted_user["role"], "admin");
+
+    drop_isolated_database(&test_database_url).await;
+}
+
+#[tokio::test]
+async fn server_check_route_is_super_admin_only_and_redacts_response() {
+    let Some(database_url) = Config::from_env().test_database_url else {
+        eprintln!("skipping Toasty integration test; set WARA_TEST_DATABASE_URL to run it");
+        return;
+    };
+
+    let test_database_url = create_isolated_database(&database_url).await;
+    let mut config = Config::from_env();
+    config.database_url = test_database_url.clone();
+    config.db_push_schema = true;
+    config.secret_key = "server-check-secret-key".to_string();
+    config.bootstrap_admin_email = "server-check-admin@wara.local".to_string();
+    config.bootstrap_admin_password = "correct-password".to_string();
+    config.bootstrap_admin_name = "Server Check Admin".to_string();
+
+    let database = db::connect(&config).await.expect("connect test database");
+    AuthService::new(database.clone(), config.clone())
+        .bootstrap_admin()
+        .await
+        .expect("bootstrap admin");
+    let workspace = WorkspaceService::new(database.clone())
+        .create_workspace("Server check workspace".to_string(), None)
+        .await
+        .expect("create workspace");
+    let private_key =
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nroute-test-key\n-----END OPENSSH PRIVATE KEY-----";
+    let server = ServerService::new(database.clone(), config.secret_key.clone())
+        .create_server(CreateServerInput {
+            name: "check-host".to_string(),
+            host: "203.0.113.50".to_string(),
+            port: Some(22),
+            username: "deploy".to_string(),
+            public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRoute".to_string(),
+            private_key: private_key.to_string(),
+            private_key_passphrase: Some("route-passphrase".to_string()),
+            default_proxy: Some(ProxyKind::Nginx),
+        })
+        .await
+        .expect("create server");
+    let app = routes::router(AppState::new(config, database));
+
+    let root_token = login(&app, "server-check-admin@wara.local", "correct-password").await;
+    let viewer_token = invite_accept_and_token(
+        &app,
+        &root_token,
+        workspace.id,
+        "server-check-viewer@wara.local",
+        Role::Viewer,
+    )
+    .await;
+
+    let forbidden_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/servers/{}/check", server.id))
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden_response.status(), StatusCode::FORBIDDEN);
+
+    let check_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/servers/{}/check", server.id))
+                .header("authorization", format!("Bearer {root_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(check_response.status(), StatusCode::OK);
+    let body = response_json(check_response).await;
+    assert_eq!(body["server_id"], server.id.to_string());
+    assert_eq!(body["ssh_status"], "connected");
+    assert_eq!(body["docker_status"], "available");
+    assert_eq!(body["docker_version"], "25.0.0");
+    assert!(!body.to_string().contains(private_key));
+    assert!(!body.to_string().contains("route-passphrase"));
 
     drop_isolated_database(&test_database_url).await;
 }

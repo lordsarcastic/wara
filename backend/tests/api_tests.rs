@@ -174,6 +174,7 @@ async fn product_resource_path_ids_must_be_uuids() {
     let cases = [
         (Method::GET, "/api/v1/workspaces/not-a-uuid"),
         (Method::GET, "/api/v1/servers/not-a-uuid"),
+        (Method::POST, "/api/v1/servers/not-a-uuid/check"),
         (Method::GET, "/api/v1/workspaces/not-a-uuid/environments"),
         (Method::POST, "/api/v1/workspaces/not-a-uuid/environments"),
         (Method::GET, "/api/v1/workspaces/not-a-uuid/services"),

@@ -18,6 +18,9 @@ pub struct Server {
     pub encrypted_private_key_passphrase: Option<String>,
     pub default_proxy: ProxyKind,
     pub docker_status: String,
+    pub docker_version: String,
+    pub last_check_at: String,
+    pub last_check_error: String,
 }
 
 #[derive(Debug, Clone, toasty::Model)]
@@ -34,6 +37,9 @@ pub struct ServerRecord {
     pub encrypted_private_key_passphrase: Option<String>,
     pub default_proxy: String,
     pub docker_status: String,
+    pub docker_version: String,
+    pub last_check_at: String,
+    pub last_check_error: String,
 }
 
 impl From<ServerRecord> for Server {
@@ -50,6 +56,9 @@ impl From<ServerRecord> for Server {
             encrypted_private_key_passphrase: record.encrypted_private_key_passphrase,
             default_proxy: ProxyKind::from(record.default_proxy.as_str()),
             docker_status: record.docker_status,
+            docker_version: record.docker_version,
+            last_check_at: record.last_check_at,
+            last_check_error: record.last_check_error,
         }
     }
 }
@@ -72,6 +81,9 @@ mod tests {
             encrypted_private_key_passphrase: Some("encrypted-passphrase".to_string()),
             default_proxy: ProxyKind::Nginx,
             docker_status: "unchecked".to_string(),
+            docker_version: String::new(),
+            last_check_at: String::new(),
+            last_check_error: String::new(),
         };
 
         let serialized = serde_json::to_string(&server).unwrap();

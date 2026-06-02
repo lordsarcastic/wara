@@ -44,6 +44,10 @@ async fn servers_persist_with_encrypted_ssh_key_material() {
     assert_eq!(loaded.host, "203.0.113.10");
     assert_eq!(loaded.port, 2222);
     assert_eq!(loaded.default_proxy.as_str(), "traefik");
+    assert_eq!(loaded.docker_status, "unchecked");
+    assert!(loaded.docker_version.is_empty());
+    assert!(loaded.last_check_at.is_empty());
+    assert!(loaded.last_check_error.is_empty());
     assert_ne!(loaded.encrypted_private_key, private_key);
 
     let ssh_target = service.ssh_target(&loaded).expect("build ssh target");
@@ -62,6 +66,27 @@ async fn servers_persist_with_encrypted_ssh_key_material() {
     assert!(!serialized.contains("encrypted_private_key"));
     assert!(!serialized.contains(private_key));
     assert!(!serialized.contains("key-passphrase"));
+
+    let check = service
+        .check_server(loaded.id)
+        .await
+        .expect("check server connectivity");
+    assert_eq!(check.server_id, loaded.id);
+    assert_eq!(check.ssh_status, "connected");
+    assert_eq!(check.docker_status, "available");
+    assert_eq!(check.docker_version.as_deref(), Some("25.0.0"));
+    assert!(check.error.is_none());
+    let checked = service
+        .get_server(loaded.id)
+        .await
+        .expect("load checked server");
+    assert_eq!(checked.docker_status, "available");
+    assert_eq!(checked.docker_version, "25.0.0");
+    assert!(!checked.last_check_at.is_empty());
+    assert!(checked.last_check_error.is_empty());
+    let check_json = serde_json::to_string(&check).expect("serialize check response");
+    assert!(!check_json.contains(private_key));
+    assert!(!check_json.contains("key-passphrase"));
 
     drop_isolated_database(&test_database_url).await;
 }
