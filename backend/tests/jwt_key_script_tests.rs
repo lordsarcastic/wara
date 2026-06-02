@@ -1,5 +1,6 @@
 use std::{fs, process::Command};
 
+use jsonwebtoken::EncodingKey;
 use uuid::Uuid;
 
 #[test]
@@ -22,6 +23,7 @@ fn jwt_keypair_helper_generates_snippets_without_printing_secrets() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("BEGIN PRIVATE KEY"));
     assert!(!stdout.contains("BEGIN RSA PRIVATE KEY"));
     assert!(stdout.contains("Generated JWT keypair for key id: test-key"));
 
@@ -31,7 +33,8 @@ fn jwt_keypair_helper_generates_snippets_without_printing_secrets() {
     let config_snippet =
         fs::read_to_string(output_dir.join("config.snippet.yml")).expect("config snippet");
 
-    assert!(private_key.contains("BEGIN RSA PRIVATE KEY"));
+    assert!(private_key.contains("BEGIN") && private_key.contains("PRIVATE KEY"));
+    EncodingKey::from_rsa_pem(private_key.as_bytes()).expect("private key should sign JWTs");
     assert!(public_key.contains("BEGIN PUBLIC KEY"));
     assert!(env_snippet.contains("WARA_JWT_ACTIVE_KEY_ID=test-key"));
     assert!(env_snippet.contains("WARA_JWT_PRIVATE_KEY_PEM="));
