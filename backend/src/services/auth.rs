@@ -131,7 +131,7 @@ impl AuthService {
     }
 
     pub async fn bootstrap_admin(&self) -> Result<(), ApiError> {
-        self.sync_configured_jwt_public_keys().await?;
+        self.sync_active_jwt_public_key().await?;
 
         let mut db = self.db.handle()?;
         let users = Query::<List<UserRecord>>::all()
@@ -163,7 +163,6 @@ impl AuthService {
             .exec(&mut db)
             .await
             .map_err(map_toasty_error)?;
-        records.retain(|record| record.revoked_at.is_none());
         records.sort_by(|left, right| left.created_at.cmp(&right.created_at));
         Ok(Jwks {
             keys: records.into_iter().map(Into::into).collect(),
@@ -182,7 +181,9 @@ impl AuthService {
         let user = self.user_from_record(user_record).await?;
         let mut db = self.db.handle()?;
         let refresh_token = self.issue_refresh_token(&mut db, user.id).await?;
-        let token = self.sign_access_token(&user, refresh_token.record.id)?;
+        let token = self
+            .sign_access_token(&user, refresh_token.record.id)
+            .await?;
         Ok(LoginOutput {
             token,
             refresh_token: refresh_token.token,
@@ -297,7 +298,9 @@ impl AuthService {
 
         let user = self.get_user(invite.user_id).await?;
         let refresh_token = self.issue_refresh_token(&mut db, user.id).await?;
-        let token = self.sign_access_token(&user, refresh_token.record.id)?;
+        let token = self
+            .sign_access_token(&user, refresh_token.record.id)
+            .await?;
         Ok(LoginOutput {
             token,
             refresh_token: refresh_token.token,
@@ -333,7 +336,9 @@ impl AuthService {
         update_old.exec(&mut tx).await.map_err(map_toasty_error)?;
         tx.commit().await.map_err(map_toasty_error)?;
 
-        let token = self.sign_access_token(&user, refresh_token.record.id)?;
+        let token = self
+            .sign_access_token(&user, refresh_token.record.id)
+            .await?;
         Ok(LoginOutput {
             token,
             refresh_token: refresh_token.token,
@@ -483,50 +488,68 @@ impl AuthService {
         .exec(executor)
         .await
         .map_err(map_toasty_error)?;
-        let raw_token = self.sign_refresh_token(id, user_id, now, expires_at)?;
+        let raw_token = self
+            .sign_refresh_token(id, user_id, now, expires_at)
+            .await?;
         Ok(RefreshTokenIssue {
             token: raw_token,
             record,
         })
     }
 
-    async fn sync_configured_jwt_public_keys(&self) -> Result<(), ApiError> {
+    async fn sync_active_jwt_public_key(&self) -> Result<(), ApiError> {
         let mut db = self.db.handle()?;
-        for key in &self.config.jwt_public_keys {
-            let id = Uuid::parse_str(&key.id)
-                .map_err(|error| ApiError::Internal(format!("invalid JWT key id: {error}")))?;
-            let (modulus, exponent) = rsa_public_key_components(&key.public_key_pem)?;
-            let existing =
-                Query::<List<JwtPublicKeyRecord>>::filter(JwtPublicKeyRecord::fields().id().eq(id))
-                    .first()
-                    .exec(&mut db)
-                    .await
-                    .map_err(map_toasty_error)?;
-            if existing.is_some() {
-                let mut update_key = Update::<List<JwtPublicKeyRecord>>::new(Query::<
-                    List<JwtPublicKeyRecord>,
-                >::filter(
-                    JwtPublicKeyRecord::fields().id().eq(id),
-                ));
-                update_key.set(1, "RSA");
-                update_key.set(2, "sig");
-                update_key.set(3, "RS256");
-                update_key.set(4, modulus);
-                update_key.set(5, exponent);
-                update_key.set_returning_none();
-                update_key.exec(&mut db).await.map_err(map_toasty_error)?;
-                continue;
-            }
+        let (modulus, exponent) = rsa_public_key_components(&self.config.jwt_public_key)?;
+        let records = Query::<List<JwtPublicKeyRecord>>::all()
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
+        let active_key_id = records
+            .iter()
+            .find(|record| record.modulus == modulus && record.exponent == exponent)
+            .map(|record| record.id)
+            .unwrap_or_else(Uuid::now_v7);
 
+        for record in records {
+            let mut update_key =
+                Update::<List<JwtPublicKeyRecord>>::new(Query::<List<JwtPublicKeyRecord>>::filter(
+                    JwtPublicKeyRecord::fields().id().eq(record.id),
+                ));
+            update_key.set(6, record.id == active_key_id);
+            update_key.set_returning_none();
+            update_key.exec(&mut db).await.map_err(map_toasty_error)?;
+        }
+
+        let existing = Query::<List<JwtPublicKeyRecord>>::filter(
+            JwtPublicKeyRecord::fields().id().eq(active_key_id),
+        )
+        .first()
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?;
+        if existing.is_some() {
+            let mut update_key =
+                Update::<List<JwtPublicKeyRecord>>::new(Query::<List<JwtPublicKeyRecord>>::filter(
+                    JwtPublicKeyRecord::fields().id().eq(active_key_id),
+                ));
+            update_key.set(1, "RSA");
+            update_key.set(2, "sig");
+            update_key.set(3, "RS256");
+            update_key.set(4, modulus);
+            update_key.set(5, exponent);
+            update_key.set(6, true);
+            update_key.set_returning_none();
+            update_key.exec(&mut db).await.map_err(map_toasty_error)?;
+        } else {
             toasty::create!(JwtPublicKeyRecord {
-                id,
+                id: active_key_id,
                 key_type: "RSA".to_string(),
                 key_use: "sig".to_string(),
                 algorithm: "RS256".to_string(),
                 modulus,
                 exponent,
+                is_active: true,
                 created_at: Utc::now().to_rfc3339(),
-                revoked_at: None,
             })
             .exec(&mut db)
             .await
@@ -544,11 +567,27 @@ impl AuthService {
                 .await
                 .map_err(map_toasty_error)?
                 .ok_or(ApiError::Unauthorized)?;
-        if record.revoked_at.is_some() {
-            return Err(ApiError::Unauthorized);
-        }
         if record.key_type != "RSA" || record.key_use != "sig" || record.algorithm != "RS256" {
             return Err(ApiError::Unauthorized);
+        }
+        Ok(record)
+    }
+
+    async fn active_jwt_public_key_record(&self) -> Result<JwtPublicKeyRecord, ApiError> {
+        let mut db = self.db.handle()?;
+        let records = Query::<List<JwtPublicKeyRecord>>::all()
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
+        let record = records
+            .into_iter()
+            .filter(|record| record.is_active)
+            .max_by(|left, right| left.created_at.cmp(&right.created_at))
+            .ok_or_else(|| ApiError::Internal("active JWT public key is missing".to_string()))?;
+        if record.key_type != "RSA" || record.key_use != "sig" || record.algorithm != "RS256" {
+            return Err(ApiError::Internal(
+                "active JWT public key has invalid JWK metadata".to_string(),
+            ));
         }
         Ok(record)
     }
@@ -698,7 +737,11 @@ impl AuthService {
         Ok(invite)
     }
 
-    fn sign_access_token(&self, user: &User, refresh_token_id: Uuid) -> Result<String, ApiError> {
+    async fn sign_access_token(
+        &self,
+        user: &User,
+        refresh_token_id: Uuid,
+    ) -> Result<String, ApiError> {
         let now = get_current_timestamp();
         let claims = Claims {
             jti: Uuid::now_v7().to_string(),
@@ -713,13 +756,14 @@ impl AuthService {
         };
         let key = EncodingKey::from_rsa_pem(self.config.jwt_private_key_pem.as_bytes())
             .map_err(|error| ApiError::Internal(format!("invalid JWT private key: {error}")))?;
+        let active_key = self.active_jwt_public_key_record().await?;
         let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(self.config.jwt_active_key_id.clone());
+        header.kid = Some(active_key.id.to_string());
         encode(&header, &claims, &key)
             .map_err(|error| ApiError::Internal(format!("failed to sign JWT: {error}")))
     }
 
-    fn sign_refresh_token(
+    async fn sign_refresh_token(
         &self,
         refresh_token_id: Uuid,
         user_id: Uuid,
@@ -737,8 +781,9 @@ impl AuthService {
         };
         let key = EncodingKey::from_rsa_pem(self.config.jwt_private_key_pem.as_bytes())
             .map_err(|error| ApiError::Internal(format!("invalid JWT private key: {error}")))?;
+        let active_key = self.active_jwt_public_key_record().await?;
         let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(self.config.jwt_active_key_id.clone());
+        header.kid = Some(active_key.id.to_string());
         encode(&header, &claims, &key)
             .map_err(|error| ApiError::Internal(format!("failed to sign refresh JWT: {error}")))
     }

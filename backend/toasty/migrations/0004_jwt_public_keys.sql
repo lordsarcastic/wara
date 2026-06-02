@@ -5,7 +5,7 @@ CREATE TABLE "jwt_public_key_records" (
     "algorithm" TEXT NOT NULL,
     "modulus" TEXT NOT NULL,
     "exponent" TEXT NOT NULL,
+    "is_active" BOOLEAN NOT NULL,
     "created_at" TEXT NOT NULL,
-    "revoked_at" TEXT,
     PRIMARY KEY ("id")
 );

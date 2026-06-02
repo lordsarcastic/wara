@@ -1,10 +1,9 @@
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, get_current_timestamp,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
 use crate::libs::docker::{DEFAULT_DOCKERFILE_CONTEXT_DIR, DEFAULT_REMOTE_SERVICES_ROOT};
 
@@ -45,14 +44,6 @@ Qt3dU+OXkYdnvEXy79ORpKSpR6JKW/gDQ3cuxavgyJ8d1Xd7fiI6OX/iimsQCTDZ
 CANrHvQYI4/gmhRTv53ypyFRWA0sN4FKbEazCSP1dZFV07GCAAR/hTy+xOudgde9
 +QIDAQAB
 -----END PUBLIC KEY-----"#;
-
-pub const DEFAULT_JWT_ACTIVE_KEY_ID: &str = "01973571-7a80-7000-8000-000000000001";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JwtVerificationKeyConfig {
-    pub id: String,
-    pub public_key_pem: String,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtKeyProbeClaims {
@@ -107,9 +98,7 @@ pub struct Config {
     pub remote_services_root: String,
     pub dockerfile_context_dir: String,
     pub jwt_private_key_pem: String,
-    pub jwt_public_key_pem: String,
-    pub jwt_active_key_id: String,
-    pub jwt_public_keys: Vec<JwtVerificationKeyConfig>,
+    pub jwt_public_key: String,
     pub jwt_issuer: String,
     pub jwt_audience: String,
     pub jwt_access_token_ttl_seconds: u64,
@@ -160,31 +149,16 @@ impl Config {
             file.app_env,
             "development".to_string(),
         ));
-        let jwt_active_key_id = non_empty_setting(
-            "WARA_JWT_ACTIVE_KEY_ID",
-            file.jwt_active_key_id,
-            DEFAULT_JWT_ACTIVE_KEY_ID.to_string(),
-        );
         let jwt_private_key_pem = non_empty_setting(
             "WARA_JWT_PRIVATE_KEY_PEM",
             file.jwt_private_key_pem,
             DEFAULT_JWT_PRIVATE_KEY_PEM.to_string(),
         );
-        let jwt_public_key_pem = non_empty_setting(
-            "WARA_JWT_PUBLIC_KEY_PEM",
-            file.jwt_public_key_pem,
+        let jwt_public_key = non_empty_setting(
+            "WARA_JWT_PUBLIC_KEY",
+            file.jwt_public_key,
             DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
         );
-        let jwt_public_keys = json_setting::<Vec<JwtVerificationKeyConfig>>(
-            "WARA_JWT_PUBLIC_KEYS",
-            file.jwt_public_keys,
-        )
-        .unwrap_or_else(|| {
-            vec![JwtVerificationKeyConfig {
-                id: jwt_active_key_id.clone(),
-                public_key_pem: jwt_public_key_pem.clone(),
-            }]
-        });
         Self {
             app_env,
             config_file: config_path(),
@@ -220,9 +194,7 @@ impl Config {
                 DEFAULT_DOCKERFILE_CONTEXT_DIR.to_string(),
             ),
             jwt_private_key_pem,
-            jwt_public_key_pem,
-            jwt_active_key_id,
-            jwt_public_keys,
+            jwt_public_key,
             jwt_issuer: setting("WARA_JWT_ISSUER", file.jwt_issuer, "wara".to_string()),
             jwt_audience: setting(
                 "WARA_JWT_AUDIENCE",
@@ -367,78 +339,25 @@ impl Config {
     }
 
     pub fn validate_jwt_key_config(&self) -> anyhow::Result<()> {
-        let active_key_id = self.jwt_active_key_id.trim();
-        if active_key_id.is_empty() {
-            anyhow::bail!("WARA_JWT_ACTIVE_KEY_ID must not be empty");
-        }
-        Uuid::parse_str(active_key_id)
-            .map_err(|error| anyhow::anyhow!("WARA_JWT_ACTIVE_KEY_ID must be a UUID: {error}"))?;
         if self.jwt_private_key_pem.trim().is_empty() {
             anyhow::bail!("WARA_JWT_PRIVATE_KEY_PEM must not be empty");
         }
         EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes())
             .map_err(|error| anyhow::anyhow!("invalid active JWT private key PEM: {error}"))?;
-
-        if self.jwt_public_keys.is_empty() {
-            anyhow::bail!("WARA_JWT_PUBLIC_KEYS must contain at least one public verification key");
+        if self.jwt_public_key.trim().is_empty() {
+            anyhow::bail!("WARA_JWT_PUBLIC_KEY must not be empty");
         }
-
-        let mut seen = HashSet::new();
-        let mut has_active_key = false;
-        for key in &self.jwt_public_keys {
-            let key_id = key.id.trim();
-            if key_id.is_empty() {
-                anyhow::bail!("JWT public verification key id must not be empty");
-            }
-            Uuid::parse_str(key_id).map_err(|error| {
-                anyhow::anyhow!("JWT public verification key id {key_id} must be a UUID: {error}")
-            })?;
-            if !seen.insert(key_id.to_string()) {
-                anyhow::bail!("duplicate JWT public verification key id: {key_id}");
-            }
-            if key.public_key_pem.trim().is_empty() {
-                anyhow::bail!("JWT public verification key {key_id} PEM must not be empty");
-            }
-            DecodingKey::from_rsa_pem(key.public_key_pem.as_bytes()).map_err(|error| {
-                anyhow::anyhow!("invalid JWT public verification key {key_id} PEM: {error}")
-            })?;
-            has_active_key |= key_id == active_key_id;
-        }
-
-        if !has_active_key {
-            anyhow::bail!(
-                "active JWT signing key id {active_key_id} is missing from WARA_JWT_PUBLIC_KEYS"
-            );
-        }
+        DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes())
+            .map_err(|error| anyhow::anyhow!("invalid JWT public key PEM: {error}"))?;
 
         self.verify_active_private_key_matches_public_key()
     }
 
-    pub fn jwt_public_key_for_id(&self, key_id: &str) -> Option<&str> {
-        self.jwt_public_keys
-            .iter()
-            .find(|key| key.id == key_id)
-            .map(|key| key.public_key_pem.as_str())
-    }
-
     fn verify_active_private_key_matches_public_key(&self) -> anyhow::Result<()> {
-        let active_public_key = self
-            .jwt_public_key_for_id(&self.jwt_active_key_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "active JWT signing key id {} is missing from WARA_JWT_PUBLIC_KEYS",
-                    self.jwt_active_key_id
-                )
-            })?;
         let signing_key = EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes())
             .map_err(|error| anyhow::anyhow!("invalid active JWT private key PEM: {error}"))?;
-        let verification_key =
-            DecodingKey::from_rsa_pem(active_public_key.as_bytes()).map_err(|error| {
-                anyhow::anyhow!(
-                    "invalid JWT public verification key {} PEM: {error}",
-                    self.jwt_active_key_id
-                )
-            })?;
+        let verification_key = DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes())
+            .map_err(|error| anyhow::anyhow!("invalid JWT public key PEM: {error}"))?;
 
         let now = get_current_timestamp();
         let claims = JwtKeyProbeClaims {
@@ -448,8 +367,7 @@ impl Config {
             iat: now,
             exp: now + 60,
         };
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(self.jwt_active_key_id.clone());
+        let header = Header::new(Algorithm::RS256);
         let token = encode(&header, &claims, &signing_key)
             .map_err(|error| anyhow::anyhow!("failed to sign JWT key config probe: {error}"))?;
         let mut validation = Validation::new(Algorithm::RS256);
@@ -457,10 +375,7 @@ impl Config {
         validation.set_issuer(&[self.jwt_issuer.as_str()]);
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
         decode::<JwtKeyProbeClaims>(&token, &verification_key, &validation).map_err(|error| {
-            anyhow::anyhow!(
-                "active JWT private key does not match public verification key {}: {error}",
-                self.jwt_active_key_id
-            )
+            anyhow::anyhow!("active JWT private key does not match configured public key: {error}")
         })?;
         Ok(())
     }
@@ -481,9 +396,7 @@ struct ConfigFile {
     remote_services_root: Option<String>,
     dockerfile_context_dir: Option<String>,
     jwt_private_key_pem: Option<String>,
-    jwt_public_key_pem: Option<String>,
-    jwt_active_key_id: Option<String>,
-    jwt_public_keys: Option<Vec<JwtVerificationKeyConfig>>,
+    jwt_public_key: Option<String>,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
     jwt_access_token_ttl_seconds: Option<u64>,
@@ -568,17 +481,6 @@ fn optional_setting(env_name: &str, file_value: Option<String>) -> Option<String
     std::env::var(env_name).ok().or(file_value)
 }
 
-fn json_setting<T>(env_name: &str, file_value: Option<T>) -> Option<T>
-where
-    T: DeserializeOwned,
-{
-    std::env::var(env_name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .and_then(|value| serde_json::from_str(&value).ok())
-        .or(file_value)
-}
-
 fn bool_setting(env_name: &str, file_value: Option<bool>, default: bool) -> bool {
     std::env::var(env_name)
         .ok()
@@ -637,10 +539,8 @@ tQIDAQAB
             "WARA_TELEMETRY_ENABLED",
             "WARA_REMOTE_SERVICES_ROOT",
             "WARA_DOCKERFILE_CONTEXT_DIR",
-            "WARA_JWT_ACTIVE_KEY_ID",
             "WARA_JWT_PRIVATE_KEY_PEM",
-            "WARA_JWT_PUBLIC_KEY_PEM",
-            "WARA_JWT_PUBLIC_KEYS",
+            "WARA_JWT_PUBLIC_KEY",
             "TEMPORAL_NAMESPACE",
             "OTEL_SERVICE_NAME",
         ];
@@ -691,80 +591,13 @@ tQIDAQAB
         config
             .validate_jwt_key_config()
             .expect("default JWT key config should validate");
-        assert_eq!(config.jwt_active_key_id, DEFAULT_JWT_ACTIVE_KEY_ID);
-        assert_eq!(config.jwt_public_keys.len(), 1);
-        assert_eq!(config.jwt_public_keys[0].id, DEFAULT_JWT_ACTIVE_KEY_ID);
-    }
-
-    #[test]
-    fn duplicate_jwt_public_key_ids_are_rejected() {
-        let config = Config::from_sources(ConfigFile {
-            jwt_public_keys: Some(vec![
-                JwtVerificationKeyConfig {
-                    id: DEFAULT_JWT_ACTIVE_KEY_ID.to_string(),
-                    public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
-                },
-                JwtVerificationKeyConfig {
-                    id: DEFAULT_JWT_ACTIVE_KEY_ID.to_string(),
-                    public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
-                },
-            ]),
-            ..ConfigFile::default()
-        });
-
-        let error = config
-            .validate_jwt_key_config()
-            .expect_err("duplicate JWT key ids should fail");
-        assert!(error.to_string().contains("duplicate JWT public"));
-    }
-
-    #[test]
-    fn missing_active_jwt_public_key_is_rejected() {
-        let active_key_id = "01973571-7a80-7000-8000-000000000010";
-        let old_key_id = "01973571-7a80-7000-8000-000000000011";
-        let config = Config::from_sources(ConfigFile {
-            jwt_active_key_id: Some(active_key_id.to_string()),
-            jwt_public_keys: Some(vec![JwtVerificationKeyConfig {
-                id: old_key_id.to_string(),
-                public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
-            }]),
-            ..ConfigFile::default()
-        });
-
-        let error = config
-            .validate_jwt_key_config()
-            .expect_err("missing active JWT public key should fail");
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("active JWT signing key id {active_key_id}"))
-        );
-    }
-
-    #[test]
-    fn non_uuid_jwt_key_ids_are_rejected() {
-        let config = Config::from_sources(ConfigFile {
-            jwt_active_key_id: Some("active".to_string()),
-            jwt_public_keys: Some(vec![JwtVerificationKeyConfig {
-                id: "active".to_string(),
-                public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
-            }]),
-            ..ConfigFile::default()
-        });
-
-        let error = config
-            .validate_jwt_key_config()
-            .expect_err("non-UUID JWT key ids should fail");
-        assert!(error.to_string().contains("must be a UUID"));
+        assert_eq!(config.jwt_public_key, DEFAULT_JWT_PUBLIC_KEY_PEM);
     }
 
     #[test]
     fn malformed_jwt_public_key_is_rejected() {
         let config = Config::from_sources(ConfigFile {
-            jwt_public_keys: Some(vec![JwtVerificationKeyConfig {
-                id: DEFAULT_JWT_ACTIVE_KEY_ID.to_string(),
-                public_key_pem: "not a public key".to_string(),
-            }]),
+            jwt_public_key: Some("not a public key".to_string()),
             ..ConfigFile::default()
         });
 
@@ -777,10 +610,7 @@ tQIDAQAB
     #[test]
     fn mismatched_active_jwt_key_material_is_rejected() {
         let config = Config::from_sources(ConfigFile {
-            jwt_public_keys: Some(vec![JwtVerificationKeyConfig {
-                id: DEFAULT_JWT_ACTIVE_KEY_ID.to_string(),
-                public_key_pem: OTHER_PUBLIC_KEY_PEM.to_string(),
-            }]),
+            jwt_public_key: Some(OTHER_PUBLIC_KEY_PEM.to_string()),
             ..ConfigFile::default()
         });
 

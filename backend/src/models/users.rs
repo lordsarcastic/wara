@@ -159,8 +159,8 @@ pub struct JwtPublicKeyRecord {
     pub algorithm: String,
     pub modulus: String,
     pub exponent: String,
+    pub is_active: bool,
     pub created_at: String,
-    pub revoked_at: Option<String>,
 }
 
 impl From<JwtPublicKeyRecord> for JwtPublicKey {

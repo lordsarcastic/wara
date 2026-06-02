@@ -129,8 +129,7 @@ async fn unmatched_api_routes_use_error_envelope() {
 
 #[tokio::test]
 async fn internal_errors_are_redacted_in_error_envelope() {
-    let mut config = Config::from_env();
-    config.jwt_public_keys[0].public_key_pem = "not a valid public key".to_string();
+    let config = Config::from_env();
     let token = sign_test_jwt(&config);
     let state = AppState::new(config, Database::unavailable_for_tests());
     let response = routes::router(state)
@@ -164,7 +163,7 @@ fn sign_test_jwt(config: &Config) -> String {
         exp: now + config.jwt_access_token_ttl_seconds,
     };
     let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(config.jwt_active_key_id.clone());
+    header.kid = Some(uuid::Uuid::now_v7().to_string());
     let key = EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
         .expect("test private key should parse");
     encode(&header, &claims, &key).expect("sign test JWT")

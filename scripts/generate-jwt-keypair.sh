@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/generate-jwt-keypair.sh [key-id-uuid] [output-dir]
+Usage: scripts/generate-jwt-keypair.sh [output-dir]
 
 Generates an RSA JWT signing keypair and writes:
   private.pem          Secret signing key. Store in deployment secrets.
@@ -11,8 +11,7 @@ Generates an RSA JWT signing keypair and writes:
   env.snippet          Environment-variable snippet for secret managers.
   config.snippet.yml   ~/.wara/config.yml snippet.
 
-The script does not print private key material to stdout. If no key id is
-provided, a UUIDv7 key id is generated.
+The script does not print private key material to stdout.
 USAGE
 }
 
@@ -30,7 +29,7 @@ command -v python3 >/dev/null 2>&1 || {
   exit 1
 }
 
-default_key_id="$(
+default_output_dir="$(
   python3 - <<'PY'
 import os
 import random
@@ -45,18 +44,7 @@ value |= 0b10 << 62
 print(uuid.UUID(int=value))
 PY
 )"
-key_id="${1:-$default_key_id}"
-output_dir="${2:-jwt-key-${key_id}}"
-
-python3 - "$key_id" <<'PY'
-import sys
-import uuid
-
-try:
-    uuid.UUID(sys.argv[1])
-except ValueError:
-    raise SystemExit("key-id must be a UUID")
-PY
+output_dir="${1:-jwt-key-${default_output_dir}}"
 
 umask 077
 mkdir -p "$output_dir"
@@ -75,22 +63,19 @@ fi
 openssl genrsa -out "$private_key_path" 2048 >/dev/null 2>&1
 openssl rsa -in "$private_key_path" -pubout -out "$public_key_path" >/dev/null 2>&1
 
-python3 - "$key_id" "$private_key_path" "$public_key_path" "$env_snippet_path" "$config_snippet_path" <<'PY'
-import json
+python3 - "$private_key_path" "$public_key_path" "$env_snippet_path" "$config_snippet_path" <<'PY'
 import pathlib
 import shlex
 import sys
 
-key_id, private_path, public_path, env_path, config_path = sys.argv[1:]
+private_path, public_path, env_path, config_path = sys.argv[1:]
 private_key = pathlib.Path(private_path).read_text()
 public_key = pathlib.Path(public_path).read_text()
 
-public_keys = json.dumps([{"id": key_id, "public_key_pem": public_key}], separators=(",", ":"))
 env_contents = "\n".join(
     [
-        f"WARA_JWT_ACTIVE_KEY_ID={shlex.quote(key_id)}",
         f"WARA_JWT_PRIVATE_KEY_PEM={shlex.quote(private_key)}",
-        f"WARA_JWT_PUBLIC_KEYS={shlex.quote(public_keys)}",
+        f"WARA_JWT_PUBLIC_KEY={shlex.quote(public_key)}",
         "",
     ]
 )
@@ -101,13 +86,10 @@ def yaml_block(value: str, indent: int = 2) -> str:
     return "".join(f"{prefix}{line}\n" for line in value.splitlines())
 
 config_contents = (
-    f"jwt_active_key_id: {json.dumps(key_id)}\n"
     "jwt_private_key_pem: |\n"
     f"{yaml_block(private_key)}"
-    "jwt_public_keys:\n"
-    f"  - id: {json.dumps(key_id)}\n"
-    "    public_key_pem: |\n"
-    f"{yaml_block(public_key, 6)}"
+    "jwt_public_key: |\n"
+    f"{yaml_block(public_key)}"
 )
 pathlib.Path(config_path).write_text(config_contents)
 PY
@@ -115,7 +97,7 @@ PY
 chmod 600 "$private_key_path" "$public_key_path" "$env_snippet_path" "$config_snippet_path"
 
 cat <<EOF
-Generated JWT keypair for key id: $key_id
+Generated JWT keypair.
 
 Secret files:
   $private_key_path

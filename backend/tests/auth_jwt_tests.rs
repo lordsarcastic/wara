@@ -10,12 +10,11 @@ use serde_json::Value;
 use tower::ServiceExt;
 use uuid::Uuid;
 use wara_backend::{
-    libs::{
-        config::{Config, DEFAULT_JWT_PUBLIC_KEY_PEM, JwtVerificationKeyConfig},
-        db,
-        docker::DeployKind,
+    libs::{config::Config, db, docker::DeployKind},
+    models::users::{
+        JwtPublicKeyRecord, Role, UserApiTokenRecord, UserRefreshTokenRecord,
+        WorkspaceUserRoleRecord,
     },
-    models::users::{Role, UserApiTokenRecord, UserRefreshTokenRecord, WorkspaceUserRoleRecord},
     routes,
     services::{
         app_services::{AppServiceService, CreateAppServiceInput},
@@ -67,23 +66,13 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     config.bootstrap_admin_email = "admin-auth@wara.local".to_string();
     config.bootstrap_admin_password = "correct-password".to_string();
     config.bootstrap_admin_name = "Auth Admin".to_string();
-    config.jwt_public_keys = vec![
-        JwtVerificationKeyConfig {
-            id: OLD_JWT_KEY_ID.to_string(),
-            public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
-        },
-        JwtVerificationKeyConfig {
-            id: config.jwt_active_key_id.clone(),
-            public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
-        },
-    ];
 
     let database = db::connect(&config).await.expect("connect test database");
     AuthService::new(database.clone(), config.clone())
         .bootstrap_admin()
         .await
         .expect("bootstrap admin");
-    let app = routes::router(AppState::new(config.clone(), database));
+    let app = routes::router(AppState::new(config.clone(), database.clone()));
 
     let login_response = app
         .clone()
@@ -104,10 +93,8 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     let token = login_body["token"].as_str().expect("jwt token");
     assert_eq!(token.split('.').count(), 3);
     let header = jsonwebtoken::decode_header(token).expect("decode JWT header");
-    assert_eq!(
-        header.kid.as_deref(),
-        Some(config.jwt_active_key_id.as_str())
-    );
+    let active_key_id = header.kid.expect("active kid");
+    assert!(Uuid::parse_str(&active_key_id).is_ok());
     let claims = decode_access_claims(&config, token);
     assert!(Uuid::parse_str(&claims.jti).is_ok());
     assert_eq!(
@@ -136,13 +123,28 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     let keys = jwks_body["keys"].as_array().expect("jwks keys");
     let active_key = keys
         .iter()
-        .find(|key| key["kid"] == config.jwt_active_key_id)
+        .find(|key| key["kid"] == active_key_id)
         .expect("active key in jwks");
     assert_eq!(active_key["kty"], "RSA");
     assert_eq!(active_key["use"], "sig");
     assert_eq!(active_key["alg"], "RS256");
     assert!(active_key["n"].as_str().expect("modulus").len() > 100);
     assert_eq!(active_key["e"], "AQAB");
+
+    let mut db_handle = database.handle().expect("database handle");
+    toasty::create!(JwtPublicKeyRecord {
+        id: Uuid::parse_str(OLD_JWT_KEY_ID).expect("old key id"),
+        key_type: "RSA".to_string(),
+        key_use: "sig".to_string(),
+        algorithm: "RS256".to_string(),
+        modulus: active_key["n"].as_str().expect("modulus").to_string(),
+        exponent: active_key["e"].as_str().expect("exponent").to_string(),
+        is_active: false,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    })
+    .exec(&mut db_handle)
+    .await
+    .expect("insert inactive old JWT public key");
 
     let me_response = app
         .clone()
@@ -278,6 +280,10 @@ async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() 
     assert_eq!(first_login.status(), StatusCode::OK);
     let first_login_body = response_json(first_login).await;
     let first_access_token = first_login_body["token"].as_str().expect("access token");
+    let active_key_id = jsonwebtoken::decode_header(first_access_token)
+        .expect("decode JWT header")
+        .kid
+        .expect("active kid");
     let user_id = Uuid::parse_str(
         first_login_body["user"]["id"]
             .as_str()
@@ -353,7 +359,7 @@ async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() 
         .unwrap();
     assert_eq!(malformed_response.status(), StatusCode::UNAUTHORIZED);
 
-    let unknown_refresh_token = sign_unknown_refresh_token(&config, user_id);
+    let unknown_refresh_token = sign_unknown_refresh_token(&config, user_id, &active_key_id);
     let unknown_response = app
         .clone()
         .oneshot(
@@ -1181,7 +1187,7 @@ async fn response_json(response: axum::response::Response) -> Value {
 }
 
 fn decode_access_claims(config: &Config, token: &str) -> TestClaims {
-    let key = DecodingKey::from_rsa_pem(config.jwt_public_key_pem.as_bytes())
+    let key = DecodingKey::from_rsa_pem(config.jwt_public_key.as_bytes())
         .expect("test public key should parse");
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_audience(&[config.jwt_audience.as_str()]);
@@ -1193,7 +1199,7 @@ fn decode_access_claims(config: &Config, token: &str) -> TestClaims {
 }
 
 fn decode_refresh_claims(config: &Config, token: &str) -> TestRefreshClaims {
-    let key = DecodingKey::from_rsa_pem(config.jwt_public_key_pem.as_bytes())
+    let key = DecodingKey::from_rsa_pem(config.jwt_public_key.as_bytes())
         .expect("test public key should parse");
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_audience(&[config.jwt_audience.as_str()]);
@@ -1204,7 +1210,7 @@ fn decode_refresh_claims(config: &Config, token: &str) -> TestRefreshClaims {
         .claims
 }
 
-fn sign_unknown_refresh_token(config: &Config, user_id: Uuid) -> String {
+fn sign_unknown_refresh_token(config: &Config, user_id: Uuid, key_id: &str) -> String {
     let now = get_current_timestamp();
     let claims = TestRefreshClaims {
         jti: Uuid::now_v7().to_string(),
@@ -1218,7 +1224,7 @@ fn sign_unknown_refresh_token(config: &Config, user_id: Uuid) -> String {
     let key = EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
         .expect("test private key should parse");
     let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(config.jwt_active_key_id.clone());
+    header.kid = Some(key_id.to_string());
     encode(&header, &claims, &key).expect("sign refresh token")
 }
 

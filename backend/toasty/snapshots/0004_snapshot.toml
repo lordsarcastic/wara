@@ -824,16 +824,15 @@ storage_ty = "Text"
 
 [[schema.tables.columns]]
 id = { table = 14, index = 6 }
-name = "created_at"
-ty = "String"
-storage_ty = "Text"
+name = "is_active"
+ty = "Bool"
+storage_ty = "Boolean"
 
 [[schema.tables.columns]]
 id = { table = 14, index = 7 }
-name = "revoked_at"
-ty = "Option<String>"
+name = "created_at"
+ty = "String"
 storage_ty = "Text"
-nullable = true
 
 [[schema.tables.indices]]
 id = { table = 14, index = 0 }

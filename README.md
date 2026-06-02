@@ -75,12 +75,12 @@ Environment variables override config file values. See:
 - [.env.example](./.env.example)
 - [docs/config.example.yml](./docs/config.example.yml)
 
-JWT access and refresh tokens are signed with the private key configured by
-`WARA_JWT_ACTIVE_KEY_ID` and `WARA_JWT_PRIVATE_KEY_PEM`. `WARA_JWT_ACTIVE_KEY_ID`
-must be a UUID and is written into each token header as `kid`.
-`WARA_JWT_PUBLIC_KEYS` is public key PEM seed material keyed by UUID `id`; on
-startup Wara stores public verification keys in the database as JWK components
-(`kid`, `kty`, `use`, `alg`, `n`, `e`), not raw PEM.
+JWT access and refresh tokens are signed with `WARA_JWT_PRIVATE_KEY_PEM`. On
+startup Wara reads `WARA_JWT_PUBLIC_KEY`, stores it in the database as JWK
+components (`kid`, `kty`, `use`, `alg`, `n`, `e`), and marks that row active.
+The generated/stored UUIDv7 row id is written into each token header as `kid`.
+Older DB rows are marked inactive, but remain available for verification while
+tokens signed by them expire.
 
 Clients can fetch the active public key set from:
 
@@ -102,15 +102,11 @@ JWT signing key rotation is an operator deployment procedure, not an application
 API:
 
 1. Generate a new keypair locally with the helper script.
-2. Add the new public key seed to `WARA_JWT_PUBLIC_KEYS` while keeping the old
-   active signing key.
-3. Restart or roll the backend so every instance stores and can verify old and
-   new keys.
-4. Set `WARA_JWT_ACTIVE_KEY_ID` and `WARA_JWT_PRIVATE_KEY_PEM` to the new key.
-5. Restart or roll the backend again so new access tokens use the new `kid`.
-6. Wait for access tokens signed by the old key to expire.
-7. Revoke or remove the old public key from the DB/configured key set.
-8. Restart or roll the backend one final time.
+2. Set `WARA_JWT_PRIVATE_KEY_PEM` and `WARA_JWT_PUBLIC_KEY` to the new pair.
+3. Restart or roll the backend so every instance stores the new public key as
+   active and signs new tokens with its DB `kid`.
+4. Wait for tokens signed by the old key to expire.
+5. Remove expired inactive keys from the database when they are no longer needed.
 
 For development, the default bootstrapped admin is:
 
