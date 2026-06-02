@@ -2,15 +2,15 @@ use toasty::stmt::{List, Query};
 use uuid::Uuid;
 
 use crate::{
-    entities::services::{AppService, AppServiceRecord},
     errors::ApiError,
     libs::{db::Database, docker::DeployKind},
-    services::projects::ProjectService,
+    models::services::{AppService, AppServiceRecord},
+    services::workspaces::WorkspaceService,
 };
 
 #[derive(Debug, Clone)]
 pub struct CreateAppServiceInput {
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     pub environment_id: Uuid,
     pub name: String,
     pub deploy_kind: DeployKind,
@@ -30,10 +30,10 @@ impl AppServiceService {
         Self { db }
     }
 
-    pub async fn list_services(&self, project_id: Uuid) -> Result<Vec<AppService>, ApiError> {
+    pub async fn list_services(&self, workspace_id: Uuid) -> Result<Vec<AppService>, ApiError> {
         let mut db = self.db.handle()?;
         let records = Query::<List<AppServiceRecord>>::filter(
-            AppServiceRecord::fields().project_id().eq(project_id),
+            AppServiceRecord::fields().workspace_id().eq(workspace_id),
         )
         .exec(&mut db)
         .await
@@ -45,11 +45,11 @@ impl AppServiceService {
         &self,
         input: CreateAppServiceInput,
     ) -> Result<AppService, ApiError> {
-        ProjectService::new(self.db.clone())
-            .get_project(input.project_id)
+        WorkspaceService::new(self.db.clone())
+            .get_workspace(input.workspace_id)
             .await?;
-        let environments = ProjectService::new(self.db.clone())
-            .list_environments(input.project_id)
+        let environments = WorkspaceService::new(self.db.clone())
+            .list_environments(input.workspace_id)
             .await?;
         if !environments
             .iter()
@@ -61,7 +61,7 @@ impl AppServiceService {
         let mut db = self.db.handle()?;
         let record = toasty::create!(AppServiceRecord {
             id: Uuid::now_v7(),
-            project_id: input.project_id,
+            workspace_id: input.workspace_id,
             environment_id: input.environment_id,
             name: input.name,
             deploy_kind: input.deploy_kind.as_str().to_string(),

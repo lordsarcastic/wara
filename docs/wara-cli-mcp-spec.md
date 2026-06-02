@@ -30,21 +30,21 @@ The MCP server supports both `stdio` and Streamable HTTP per the 2025-06-18 MCP 
   - `stdio` mode for local subprocess clients.
   - Streamable HTTP mode on `/mcp`, binding to `127.0.0.1` by default.
   - Validate `Origin`, require API-token auth, and honor `MCP-Protocol-Version`.
-  - Expose only safe tools: list projects/services, deploy image, deploy local artifact, get deployment, get logs, restart service, and preview proxy config.
+  - Expose only safe tools: list workspaces/services, deploy image, deploy local artifact, get deployment, get logs, restart service, and preview proxy config.
 
 ## CLI Commands
 
 - `wara auth token set --url URL --token TOKEN`
 - `wara auth token create --name NAME --scopes ...`
-- `wara projects list|get|create`
+- `wara workspaces list|get|create`
 - `wara services list|get|create`
-- `wara deploy --project ... --environment ... --service ... --image ...`
-- `wara deploy --project ... --environment ... --service ... --path ...`
+- `wara deploy --workspace ... --environment ... --service ... --image ...`
+- `wara deploy --workspace ... --environment ... --service ... --path ...`
 - `wara deploy status DEPLOYMENT_ID`
 - `wara logs --service ... [--follow]`
 - `wara restart --service ...`
 - `wara proxy preview --domain ...`
-- `wara api GET /api/v1/projects`
+- `wara api GET /api/v1/workspaces`
 
 ## Agent-Friendly Interfaces
 
@@ -52,15 +52,15 @@ Examples:
 
 ```bash
 wara --tree
-wara projects list --output json --no-interactive
-wara deploy --project api --environment production --service web --image ghcr.io/acme/web:latest --wait --output ndjson
-wara deploy --project api --environment production --service web --path . --no-interactive --output json
-wara api POST /api/v1/services/svc_123/deployments --body '{}' --output json
+wara workspaces list --output json --no-interactive
+wara deploy --workspace api --environment production --service web --image ghcr.io/acme/web:latest --wait --output ndjson
+wara deploy --workspace api --environment production --service web --path . --no-interactive --output json
+wara api POST /api/v1/services/018f6a1e-7b0d-74f8-9b7d-4f23e6d0c4ab/deployments --body '{}' --output json
 ```
 
 Progress output:
 
-- `text`: concise human lines like `queued deployment dep_...`, `running workflow ...`, `succeeded in 42s`.
+- `text`: concise human lines like `queued deployment 018f6a21-0f32-7b0f-86db-2af4d969f8c9`, `running workflow ...`, `succeeded in 42s`.
 - `ndjson`: one JSON event per line, suitable for agents and CI logs.
 - `json`: final result only unless `--wait` is used, then include event history.
 
@@ -80,7 +80,7 @@ Error behavior:
 
 ## MCP Tools
 
-- `wara_list_projects`
+- `wara_list_workspaces`
 - `wara_list_services`
 - `wara_deploy_image`
 - `wara_deploy_local_artifact`

@@ -1,4 +1,4 @@
-use crate::{entities::domains::Domain, libs::docker::ProxyKind};
+use crate::{libs::docker::ProxyKind, models::domains::Domain};
 
 pub fn generate_config(domain: &Domain, upstream: &str) -> String {
     match domain.proxy {

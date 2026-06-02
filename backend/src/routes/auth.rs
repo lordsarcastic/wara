@@ -9,8 +9,8 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::{
-    entities::users::User,
     errors::ApiError,
+    models::users::User,
     services::auth::{AcceptInviteInput, AuthService, CurrentUser, LoginInput},
     state::AppState,
 };

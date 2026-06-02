@@ -4,7 +4,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct AppService {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     pub environment_id: Uuid,
     pub name: String,
     pub deploy_kind: DeployKind,
@@ -19,7 +19,7 @@ pub struct AppServiceRecord {
     #[key]
     pub id: Uuid,
     #[index]
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     #[index]
     pub environment_id: Uuid,
     pub name: String,
@@ -34,7 +34,7 @@ impl From<AppServiceRecord> for AppService {
     fn from(record: AppServiceRecord) -> Self {
         Self {
             id: record.id,
-            project_id: record.project_id,
+            workspace_id: record.workspace_id,
             environment_id: record.environment_id,
             name: record.name,
             deploy_kind: DeployKind::from(record.deploy_kind.as_str()),

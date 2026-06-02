@@ -10,11 +10,12 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    entities::domains::Domain,
     errors::ApiError,
     libs::docker::ProxyKind,
+    models::domains::Domain,
     services::{
-        auth::CurrentUser,
+        app_services::AppServiceService,
+        auth::{CurrentUser, ensure_workspace_access},
         domains::{CreateDomainInput, DomainService},
         proxy,
     },
@@ -45,10 +46,14 @@ pub struct ProxyPreviewResponse {
 
 #[utoipa::path(get, path = "/api/v1/services/{service_id}/domains", security(("bearer_auth" = [])), params(("service_id" = Uuid, Path)), responses((status = 200, body = [Domain])))]
 pub async fn list_domains(
-    _user: CurrentUser,
-    State(state): State<AppState>,
     Path(service_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
 ) -> Result<Json<Vec<Domain>>, ApiError> {
+    let service = AppServiceService::new(state.db.clone())
+        .get_service(service_id)
+        .await?;
+    ensure_workspace_access(&user, service.workspace_id)?;
     Ok(Json(
         DomainService::new(state.db)
             .list_domains(service_id)
@@ -58,11 +63,15 @@ pub async fn list_domains(
 
 #[utoipa::path(post, path = "/api/v1/services/{service_id}/domains", security(("bearer_auth" = [])), params(("service_id" = Uuid, Path)), request_body = CreateDomainRequest, responses((status = 200, body = Domain)))]
 pub async fn create_domain(
-    _user: CurrentUser,
-    State(state): State<AppState>,
     Path(service_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
     Valid(Json(payload)): Valid<Json<CreateDomainRequest>>,
 ) -> Result<Json<Domain>, ApiError> {
+    let service = AppServiceService::new(state.db.clone())
+        .get_service(service_id)
+        .await?;
+    ensure_workspace_access(&user, service.workspace_id)?;
     Ok(Json(
         DomainService::new(state.db)
             .create_domain(CreateDomainInput {
@@ -77,11 +86,15 @@ pub async fn create_domain(
 
 #[utoipa::path(post, path = "/api/v1/domains/{id}/proxy-preview", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), responses((status = 200, body = ProxyPreviewResponse)))]
 pub async fn preview_proxy(
-    _user: CurrentUser,
-    State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
 ) -> Result<Json<ProxyPreviewResponse>, ApiError> {
-    let domain = DomainService::new(state.db).get_domain(id).await?;
+    let domain = DomainService::new(state.db.clone()).get_domain(id).await?;
+    let service = AppServiceService::new(state.db)
+        .get_service(domain.service_id)
+        .await?;
+    ensure_workspace_access(&user, service.workspace_id)?;
     Ok(Json(ProxyPreviewResponse {
         config: proxy::generate_config(&domain, "127.0.0.1:8080"),
     }))

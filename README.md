@@ -2,12 +2,12 @@
 
 Wara is a self-hosted, Docker-native application platform for running apps on
 your own servers. The goal is to provide a practical Coolify/Heroku/Render-style
-experience where users can connect Docker hosts, create projects and
+experience where users can connect Docker hosts, create workspaces and
 environments, attach Docker credentials and env vars, deploy Docker images,
 Compose files, or Dockerfiles, view logs, restart services, and generate reverse
 proxy configuration.
 
-The project is early and intentionally contribution-friendly. Backend APIs are in
+The workspace is early and intentionally contribution-friendly. Backend APIs are in
 Rust with Axum, Toasty, PostgreSQL, Utoipa OpenAPI, Temporal workflow scaffolding,
 and opt-in platform-only telemetry. The frontend is Angular with ZardUI and
 Tailwind.
@@ -18,8 +18,8 @@ Wara should become a self-hosted platform that can:
 
 - Manage one or more Docker servers over SSH.
 - Run Docker image, Docker Compose, and Dockerfile based services.
-- Support projects, environments, services, domains, credentials, env vars,
-  templates, and project duplication.
+- Support workspaces, environments, services, domains, credentials, env vars,
+  templates, and workspace duplication.
 - Use Temporal for deploy, restart, proxy, log collection, and template jobs.
 - Expose safe, documented APIs for automation.
 - Offer an agent-friendly Rust CLI and Rust MCP server for local deploy flows.
@@ -32,7 +32,7 @@ Wara should become a self-hosted platform that can:
 - `backend/`: Rust Axum API, Toasty models, Utoipa OpenAPI, auth, services, and
   Temporal worker binary.
 - `frontend/`: Angular dashboard using ZardUI and Tailwind utilities.
-- `temporal/`: Local Temporal setup matching the project conventions.
+- `temporal/`: Local Temporal setup matching the workspace conventions.
 - `observability/`: Optional local Prometheus, Jaeger, Fluent Bit,
   Elasticsearch, and Grafana stack.
 - `deploy/`: Deployment examples such as Nginx config.
@@ -45,9 +45,9 @@ Implemented foundations include:
 - Rust Axum API scaffold with `/api/v1`.
 - Swagger/OpenAPI docs.
 - Toasty/PostgreSQL persistence for core product resources.
-- Project and environment creation.
+- Workspace and environment creation.
 - Server records with SSH key-pair metadata and encrypted private key material.
-- Services, credentials, env vars, domains, deployments, templates, and project
+- Services, credentials, env vars, domains, deployments, templates, and workspace
   duplication backed by Toasty.
 - DB-backed users with Argon2 password hashes.
 - RS256 JWT access tokens.

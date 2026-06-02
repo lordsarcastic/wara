@@ -8,9 +8,13 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    entities::deployments::Deployment,
     errors::ApiError,
-    services::{auth::CurrentUser, deployments::DeploymentService},
+    models::deployments::Deployment,
+    services::{
+        app_services::AppServiceService,
+        auth::{CurrentUser, ensure_workspace_access},
+        deployments::DeploymentService,
+    },
     state::AppState,
 };
 
@@ -32,10 +36,14 @@ pub struct LogsResponse {
 
 #[utoipa::path(get, path = "/api/v1/services/{service_id}/deployments", security(("bearer_auth" = [])), params(("service_id" = Uuid, Path)), responses((status = 200, body = [Deployment])))]
 pub async fn list_deployments(
-    _user: CurrentUser,
-    State(state): State<AppState>,
     Path(service_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
 ) -> Result<Json<Vec<Deployment>>, ApiError> {
+    let service = AppServiceService::new(state.db.clone())
+        .get_service(service_id)
+        .await?;
+    ensure_workspace_access(&user, service.workspace_id)?;
     Ok(Json(
         DeploymentService::new(state.db, state.config)
             .list_deployments(service_id)
@@ -45,10 +53,14 @@ pub async fn list_deployments(
 
 #[utoipa::path(post, path = "/api/v1/services/{service_id}/deployments", security(("bearer_auth" = [])), params(("service_id" = Uuid, Path)), responses((status = 200, body = Deployment)))]
 pub async fn trigger_deploy(
-    _user: CurrentUser,
-    State(state): State<AppState>,
     Path(service_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
 ) -> Result<Json<Deployment>, ApiError> {
+    let service = AppServiceService::new(state.db.clone())
+        .get_service(service_id)
+        .await?;
+    ensure_workspace_access(&user, service.workspace_id)?;
     Ok(Json(
         DeploymentService::new(state.db, state.config)
             .trigger_deploy(service_id)
@@ -58,23 +70,30 @@ pub async fn trigger_deploy(
 
 #[utoipa::path(get, path = "/api/v1/deployments/{id}", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), responses((status = 200, body = Deployment)))]
 pub async fn get_deployment(
-    _user: CurrentUser,
-    State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
 ) -> Result<Json<Deployment>, ApiError> {
-    Ok(Json(
-        DeploymentService::new(state.db, state.config)
-            .get_deployment(id)
-            .await?,
-    ))
+    let deployment = DeploymentService::new(state.db.clone(), state.config.clone())
+        .get_deployment(id)
+        .await?;
+    let service = AppServiceService::new(state.db)
+        .get_service(deployment.service_id)
+        .await?;
+    ensure_workspace_access(&user, service.workspace_id)?;
+    Ok(Json(deployment))
 }
 
 #[utoipa::path(post, path = "/api/v1/services/{service_id}/restart", security(("bearer_auth" = [])), params(("service_id" = Uuid, Path)), responses((status = 200, body = Deployment)))]
 pub async fn restart_service(
-    _user: CurrentUser,
-    State(state): State<AppState>,
     Path(service_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
 ) -> Result<Json<Deployment>, ApiError> {
+    let service = AppServiceService::new(state.db.clone())
+        .get_service(service_id)
+        .await?;
+    ensure_workspace_access(&user, service.workspace_id)?;
     Ok(Json(
         DeploymentService::new(state.db, state.config)
             .restart_service(service_id)
@@ -84,12 +103,13 @@ pub async fn restart_service(
 
 #[utoipa::path(get, path = "/api/v1/services/{service_id}/logs", security(("bearer_auth" = [])), params(("service_id" = Uuid, Path)), responses((status = 200, body = LogsResponse)))]
 pub async fn service_logs(
-    _user: CurrentUser,
-    State(state): State<AppState>,
     Path(service_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
 ) -> Result<Json<LogsResponse>, ApiError> {
-    DeploymentService::new(state.db, state.config)
-        .service_exists(service_id)
+    let service = AppServiceService::new(state.db)
+        .get_service(service_id)
         .await?;
+    ensure_workspace_access(&user, service.workspace_id)?;
     Ok(Json(LogsResponse { output: "Platform-captured service log stream placeholder. Hosted app telemetry is not exported.".to_string() }))
 }

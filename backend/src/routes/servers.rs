@@ -9,11 +9,11 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::{
-    entities::servers::Server,
     errors::ApiError,
     libs::docker::ProxyKind,
+    models::servers::Server,
     services::{
-        auth::CurrentUser,
+        auth::{CurrentUser, ensure_super_admin},
         servers::{CreateServerInput, ServerService},
     },
     state::AppState,
@@ -47,9 +47,10 @@ pub struct CreateServerRequest {
 
 #[utoipa::path(get, path = "/api/v1/servers", security(("bearer_auth" = [])), responses((status = 200, body = [Server])))]
 pub async fn list_servers(
-    _user: CurrentUser,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Server>>, ApiError> {
+    ensure_super_admin(&user)?;
     Ok(Json(
         ServerService::new(state.db, state.config.secret_key)
             .list_servers()
@@ -59,10 +60,11 @@ pub async fn list_servers(
 
 #[utoipa::path(post, path = "/api/v1/servers", security(("bearer_auth" = [])), request_body = CreateServerRequest, responses((status = 200, body = Server)))]
 pub async fn create_server(
-    _user: CurrentUser,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
     Valid(Json(payload)): Valid<Json<CreateServerRequest>>,
 ) -> Result<Json<Server>, ApiError> {
+    ensure_super_admin(&user)?;
     Ok(Json(
         ServerService::new(state.db, state.config.secret_key)
             .create_server(payload.into())
@@ -72,10 +74,11 @@ pub async fn create_server(
 
 #[utoipa::path(get, path = "/api/v1/servers/{id}", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), responses((status = 200, body = Server), (status = 404, body = crate::errors::ErrorResponse)))]
 pub async fn get_server(
-    _user: CurrentUser,
-    State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
 ) -> Result<Json<Server>, ApiError> {
+    ensure_super_admin(&user)?;
     Ok(Json(
         ServerService::new(state.db, state.config.secret_key)
             .get_server(id)

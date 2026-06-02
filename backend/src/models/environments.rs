@@ -5,6 +5,6 @@ pub struct Environment {
     #[key]
     pub id: Uuid,
     #[index]
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     pub name: String,
 }

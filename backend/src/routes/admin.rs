@@ -3,12 +3,13 @@ use axum_valid::Valid;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    entities::users::{Role, User},
     errors::ApiError,
-    services::auth::{AdminUser, AuthService, InviteUserInput},
+    models::users::{Role, User},
+    services::auth::{AdminUser, AuthService, CurrentUser, InviteUserInput},
     state::AppState,
 };
 
@@ -18,6 +19,7 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize, ToSchema, Validate)]
 pub struct InviteUserRequest {
+    pub workspace_id: Uuid,
     #[validate(email)]
     pub email: String,
     #[validate(length(min = 1, max = 120))]
@@ -46,12 +48,14 @@ pub async fn list_users(
 
 #[utoipa::path(post, path = "/api/v1/admin/users", security(("bearer_auth" = [])), request_body = InviteUserRequest, responses((status = 200, body = InviteUserResponse)))]
 pub async fn invite_user(
-    _admin: AdminUser,
+    CurrentUser(inviter): CurrentUser,
     State(state): State<AppState>,
     Valid(Json(payload)): Valid<Json<InviteUserRequest>>,
 ) -> Result<Json<InviteUserResponse>, ApiError> {
     let output = AuthService::new(state.db, state.config)
         .invite_user(InviteUserInput {
+            inviter,
+            workspace_id: payload.workspace_id,
             email: payload.email,
             name: payload.name,
             role: payload.role,

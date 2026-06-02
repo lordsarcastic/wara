@@ -18,9 +18,12 @@ use toasty::stmt::{List, Query, Update};
 use uuid::Uuid;
 
 use crate::{
-    entities::users::{Role, User, UserInviteRecord, UserRecord, UserStatus},
     errors::ApiError,
     libs::{config::Config, db::Database},
+    models::{
+        users::{Role, User, UserInviteRecord, UserRecord, UserStatus, WorkspaceUserRoleRecord},
+        workspaces::Workspace,
+    },
     state::AppState,
 };
 
@@ -38,6 +41,8 @@ pub struct LoginOutput {
 
 #[derive(Debug, Clone)]
 pub struct InviteUserInput {
+    pub inviter: User,
+    pub workspace_id: Uuid,
     pub email: String,
     pub name: String,
     pub role: Role,
@@ -93,7 +98,7 @@ impl AuthService {
             id: Uuid::now_v7(),
             email: self.config.bootstrap_admin_email.clone(),
             name: self.config.bootstrap_admin_name.clone(),
-            role: Role::Admin.as_str().to_string(),
+            role: Role::SuperAdmin.as_str().to_string(),
             status: UserStatus::Active.as_str().to_string(),
             password_hash,
         })
@@ -112,15 +117,24 @@ impl AuthService {
             return Err(ApiError::Unauthorized);
         }
         verify_password(&input.password, &user_record.password_hash)?;
-        let user = User::from(user_record);
+        let user = self.user_from_record(user_record).await?;
         let token = self.sign_access_token(&user)?;
         Ok(LoginOutput { token, user })
     }
 
     pub async fn invite_user(&self, input: InviteUserInput) -> Result<InviteUserOutput, ApiError> {
+        if input.role == Role::SuperAdmin {
+            return Err(ApiError::BadRequest(
+                "super_admin is a global bootstrap-only role".to_string(),
+            ));
+        }
+        if !can_administer_workspace(&input.inviter, input.workspace_id) {
+            return Err(ApiError::Forbidden);
+        }
         if self.find_user_by_email(&input.email).await.is_ok() {
             return Err(ApiError::BadRequest("user already exists".to_string()));
         }
+        self.ensure_workspace_exists(input.workspace_id).await?;
 
         let now = Utc::now();
         let expires_at = now + Duration::seconds(self.config.invite_token_ttl_seconds as i64);
@@ -133,7 +147,7 @@ impl AuthService {
             id: Uuid::now_v7(),
             email: input.email,
             name: input.name,
-            role: input.role.as_str().to_string(),
+            role: Role::Viewer.as_str().to_string(),
             status: UserStatus::Invited.as_str().to_string(),
             password_hash: String::new(),
         })
@@ -152,10 +166,22 @@ impl AuthService {
         .exec(&mut tx)
         .await
         .map_err(map_toasty_error)?;
+
+        let workspace_role = toasty::create!(WorkspaceUserRoleRecord {
+            id: Uuid::now_v7(),
+            user_id: user_record.id,
+            workspace_id: input.workspace_id,
+            role: input.role.as_str().to_string(),
+        })
+        .exec(&mut tx)
+        .await
+        .map_err(map_toasty_error)?;
         tx.commit().await.map_err(map_toasty_error)?;
 
+        let mut user = User::from(user_record);
+        user.workspace_roles = vec![workspace_role.into()];
         Ok(InviteUserOutput {
-            user: User::from(user_record),
+            user,
             invite_link: invite_link(&self.config.app_base_url, &raw_token),
             expires_at,
         })
@@ -218,11 +244,16 @@ impl AuthService {
             .exec(&mut db)
             .await
             .map_err(map_toasty_error)?;
-        Ok(records.into_iter().map(User::from).collect())
+        let mut users = Vec::with_capacity(records.len());
+        for record in records {
+            users.push(self.user_from_record(record).await?);
+        }
+        Ok(users)
     }
 
     async fn get_user(&self, id: Uuid) -> Result<User, ApiError> {
-        self.get_user_record(id).await.map(User::from)
+        let record = self.get_user_record(id).await?;
+        self.user_from_record(record).await
     }
 
     async fn get_user_record(&self, id: Uuid) -> Result<UserRecord, ApiError> {
@@ -233,6 +264,34 @@ impl AuthService {
             .await
             .map_err(map_toasty_error)?;
         record.ok_or(ApiError::Unauthorized)
+    }
+
+    async fn ensure_workspace_exists(&self, id: Uuid) -> Result<(), ApiError> {
+        let mut db = self.db.handle()?;
+        let record = Query::<List<Workspace>>::filter(Workspace::fields().id().eq(id))
+            .first()
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
+        record.map(|_| ()).ok_or(ApiError::NotFound("workspace"))
+    }
+
+    async fn user_from_record(&self, record: UserRecord) -> Result<User, ApiError> {
+        let user_id = record.id;
+        let mut user = User::from(record);
+        if user.role == Role::SuperAdmin {
+            return Ok(user);
+        }
+
+        let mut db = self.db.handle()?;
+        let roles = Query::<List<WorkspaceUserRoleRecord>>::filter(
+            WorkspaceUserRoleRecord::fields().user_id().eq(user_id),
+        )
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?;
+        user.workspace_roles = roles.into_iter().map(Into::into).collect();
+        Ok(user)
     }
 
     async fn find_user_by_email(&self, email: &str) -> Result<UserRecord, ApiError> {
@@ -291,6 +350,38 @@ impl AuthService {
     }
 }
 
+pub fn ensure_workspace_access(user: &User, workspace_id: Uuid) -> Result<(), ApiError> {
+    if can_access_workspace(user, workspace_id) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+pub fn ensure_super_admin(user: &User) -> Result<(), ApiError> {
+    if user.role == Role::SuperAdmin {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+fn can_access_workspace(user: &User, workspace_id: Uuid) -> bool {
+    user.role == Role::SuperAdmin
+        || user
+            .workspace_roles
+            .iter()
+            .any(|role| role.workspace_id == workspace_id)
+}
+
+fn can_administer_workspace(user: &User, workspace_id: Uuid) -> bool {
+    user.role == Role::SuperAdmin
+        || user
+            .workspace_roles
+            .iter()
+            .any(|role| role.workspace_id == workspace_id && role.role == Role::Admin)
+}
+
 #[derive(Debug, Clone)]
 pub struct CurrentUser(pub User);
 
@@ -329,7 +420,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let CurrentUser(user) = CurrentUser::from_request_parts(parts, state).await?;
-        if user.role != Role::Admin {
+        if user.role != Role::SuperAdmin {
             return Err(ApiError::Forbidden);
         }
         Ok(AdminUser(user))

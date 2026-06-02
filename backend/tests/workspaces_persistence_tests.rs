@@ -1,11 +1,11 @@
 use uuid::Uuid;
 use wara_backend::{
     libs::{config::Config, db},
-    services::projects::ProjectService,
+    services::workspaces::WorkspaceService,
 };
 
 #[tokio::test]
-async fn projects_and_default_environment_persist_with_toasty_when_database_is_configured() {
+async fn workspaces_and_default_environment_persist_with_toasty_when_database_is_configured() {
     let Some(database_url) = Config::from_env().test_database_url else {
         eprintln!("skipping Toasty integration test; set WARA_TEST_DATABASE_URL to run it");
         return;
@@ -16,22 +16,25 @@ async fn projects_and_default_environment_persist_with_toasty_when_database_is_c
     config.database_url = test_database_url.clone();
     config.db_push_schema = true;
     let database = db::connect(&config).await.expect("connect test database");
-    let service = ProjectService::new(database);
+    let service = WorkspaceService::new(database);
 
-    let project = service
-        .create_project(
+    let workspace = service
+        .create_workspace(
             format!("audit-{}", uuid::Uuid::now_v7().simple()),
             Some("created by persistence integration test".to_string()),
         )
         .await
-        .expect("create project");
+        .expect("create workspace");
 
-    let loaded = service.get_project(project.id).await.expect("load project");
-    assert_eq!(loaded.id, project.id);
-    assert_eq!(loaded.name, project.name);
+    let loaded = service
+        .get_workspace(workspace.id)
+        .await
+        .expect("load workspace");
+    assert_eq!(loaded.id, workspace.id);
+    assert_eq!(loaded.name, workspace.name);
 
     let environments = service
-        .list_environments(project.id)
+        .list_environments(workspace.id)
         .await
         .expect("list environments");
     assert_eq!(environments.len(), 1);

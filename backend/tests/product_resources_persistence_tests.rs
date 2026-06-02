@@ -10,11 +10,11 @@ use wara_backend::{
         credentials::{CreateCredentialInput, CreateEnvVarInput, CredentialService},
         deployments::DeploymentService,
         domains::{CreateDomainInput, DomainService},
-        project_templates::{
-            CreateProjectsFromTemplateInput, CreateTemplateInput, ProjectTemplateService,
-        },
-        projects::ProjectService,
         templates::SecretCopyMode,
+        workspace_templates::{
+            CreateTemplateInput, CreateWorkspacesFromTemplateInput, WorkspaceTemplateService,
+        },
+        workspaces::WorkspaceService,
     },
 };
 
@@ -34,22 +34,22 @@ async fn product_resources_persist_with_toasty() {
     config.db_push_schema = true;
 
     let database = db::connect(&config).await.expect("connect test database");
-    let project_service = ProjectService::new(database.clone());
+    let workspace_service = WorkspaceService::new(database.clone());
     let app_service = AppServiceService::new(database.clone());
     let credential_service = CredentialService::new(database.clone(), config.secret_key.clone());
     let domain_service = DomainService::new(database.clone());
     let deployment_service = DeploymentService::new(database.clone(), config.clone());
-    let template_service = ProjectTemplateService::new(database);
+    let template_service = WorkspaceTemplateService::new(database);
 
-    let project = project_service
-        .create_project(
+    let workspace = workspace_service
+        .create_workspace(
             format!("resource-audit-{}", Uuid::now_v7().simple()),
             Some("resource persistence test".to_string()),
         )
         .await
-        .expect("create project");
-    let environment = project_service
-        .list_environments(project.id)
+        .expect("create workspace");
+    let environment = workspace_service
+        .list_environments(workspace.id)
         .await
         .expect("list environments")
         .into_iter()
@@ -58,7 +58,7 @@ async fn product_resources_persist_with_toasty() {
 
     let service = app_service
         .create_service(CreateAppServiceInput {
-            project_id: project.id,
+            workspace_id: workspace.id,
             environment_id: environment.id,
             name: "web".to_string(),
             deploy_kind: DeployKind::Dockerfile,
@@ -69,11 +69,11 @@ async fn product_resources_persist_with_toasty() {
         })
         .await
         .expect("create app service");
-    assert_eq!(service.project_id, project.id);
+    assert_eq!(service.workspace_id, workspace.id);
 
     let credential = credential_service
         .create_credential(CreateCredentialInput {
-            project_id: project.id,
+            workspace_id: workspace.id,
             registry: "ghcr.io".to_string(),
             username: "deploy".to_string(),
             password: "registry-password".to_string(),
@@ -84,7 +84,7 @@ async fn product_resources_persist_with_toasty() {
 
     let env_var = credential_service
         .create_env_var(CreateEnvVarInput {
-            project_id: project.id,
+            workspace_id: workspace.id,
             environment_id: Some(environment.id),
             service_id: Some(service.id),
             key: "DATABASE_URL".to_string(),
@@ -126,20 +126,20 @@ async fn product_resources_persist_with_toasty() {
 
     let template = template_service
         .create_template(CreateTemplateInput {
-            project_id: project.id,
+            workspace_id: workspace.id,
             name: "web-template".to_string(),
             description: Some("duplicated from template".to_string()),
         })
         .await
         .expect("create template");
     let duplicated = template_service
-        .create_projects_from_template(CreateProjectsFromTemplateInput {
+        .create_workspaces_from_template(CreateWorkspacesFromTemplateInput {
             template_id: template.id,
             names: vec!["copy-one".to_string(), "copy-two".to_string()],
             secret_copy_mode: SecretCopyMode::Empty,
         })
         .await
-        .expect("duplicate projects from template");
+        .expect("duplicate workspaces from template");
     assert_eq!(duplicated.len(), 2);
 
     drop_isolated_database(&test_database_url).await;
