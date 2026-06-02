@@ -5,6 +5,8 @@ use utoipa::OpenApi;
     paths(
         crate::routes::health,
         crate::routes::auth::login,
+        crate::routes::auth::refresh_session,
+        crate::routes::auth::logout,
         crate::routes::auth::accept_invite,
         crate::routes::auth::me,
         crate::routes::auth::list_api_tokens,
@@ -66,6 +68,8 @@ use utoipa::OpenApi;
             crate::libs::docker::ProxyKind,
             crate::routes::auth::LoginRequest,
             crate::routes::auth::LoginResponse,
+            crate::routes::auth::RefreshSessionRequest,
+            crate::routes::auth::LogoutRequest,
             crate::routes::auth::AcceptInviteRequest,
             crate::routes::auth::CreateApiTokenRequest,
             crate::routes::auth::ApiTokenResponse,

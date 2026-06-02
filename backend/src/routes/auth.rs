@@ -1,6 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
+    http::StatusCode,
     routing::{delete, get, post},
 };
 use axum_valid::Valid;
@@ -14,7 +15,8 @@ use crate::{
     errors::ApiError,
     models::users::{User, UserApiTokenRecord},
     services::auth::{
-        AcceptInviteInput, AuthService, CreateApiTokenInput, CurrentUser, LoginInput,
+        AcceptInviteInput, AuthService, CreateApiTokenInput, CurrentUser, LoginInput, LogoutInput,
+        RefreshSessionInput,
     },
     state::AppState,
 };
@@ -22,6 +24,8 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/auth/login", post(login))
+        .route("/auth/refresh", post(refresh_session))
+        .route("/auth/logout", post(logout))
         .route("/auth/invites/accept", post(accept_invite))
         .route("/auth/me", get(me))
         .route(
@@ -42,7 +46,20 @@ pub struct LoginRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LoginResponse {
     pub token: String,
+    pub refresh_token: String,
     pub user: User,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Validate)]
+pub struct RefreshSessionRequest {
+    #[validate(length(min = 1))]
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Validate)]
+pub struct LogoutRequest {
+    #[validate(length(min = 1))]
+    pub refresh_token: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema, Validate)]
@@ -93,8 +110,49 @@ pub async fn login(
         .await?;
     Ok(Json(LoginResponse {
         token: output.token,
+        refresh_token: output.refresh_token,
         user: output.user,
     }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/refresh",
+    request_body = RefreshSessionRequest,
+    responses((status = 200, body = LoginResponse), (status = 401, body = crate::errors::ErrorResponse))
+)]
+pub async fn refresh_session(
+    State(state): State<AppState>,
+    Valid(Json(payload)): Valid<Json<RefreshSessionRequest>>,
+) -> Result<Json<LoginResponse>, ApiError> {
+    let output = AuthService::new(state.db, state.config)
+        .refresh_session(RefreshSessionInput {
+            refresh_token: payload.refresh_token,
+        })
+        .await?;
+    Ok(Json(LoginResponse {
+        token: output.token,
+        refresh_token: output.refresh_token,
+        user: output.user,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/logout",
+    request_body = LogoutRequest,
+    responses((status = 204, description = "Refresh token revoked"), (status = 401, body = crate::errors::ErrorResponse))
+)]
+pub async fn logout(
+    State(state): State<AppState>,
+    Valid(Json(payload)): Valid<Json<LogoutRequest>>,
+) -> Result<StatusCode, ApiError> {
+    AuthService::new(state.db, state.config)
+        .logout(LogoutInput {
+            refresh_token: payload.refresh_token,
+        })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -125,6 +183,7 @@ pub async fn accept_invite(
         .await?;
     Ok(Json(LoginResponse {
         token: output.token,
+        refresh_token: output.refresh_token,
         user: output.user,
     }))
 }
