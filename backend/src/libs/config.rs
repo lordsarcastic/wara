@@ -112,6 +112,7 @@ pub struct Config {
     pub jwt_issuer: String,
     pub jwt_audience: String,
     pub jwt_access_token_ttl_seconds: u64,
+    pub refresh_token_ttl_seconds: u64,
     pub app_base_url: String,
     pub invite_token_ttl_seconds: u64,
     pub bootstrap_admin_email: String,
@@ -231,6 +232,11 @@ impl Config {
                 "WARA_JWT_ACCESS_TOKEN_TTL_SECONDS",
                 file.jwt_access_token_ttl_seconds,
                 900,
+            ),
+            refresh_token_ttl_seconds: u64_setting(
+                "WARA_REFRESH_TOKEN_TTL_SECONDS",
+                file.refresh_token_ttl_seconds,
+                2_592_000,
             ),
             app_base_url: setting(
                 "WARA_APP_BASE_URL",
@@ -475,6 +481,7 @@ struct ConfigFile {
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
     jwt_access_token_ttl_seconds: Option<u64>,
+    refresh_token_ttl_seconds: Option<u64>,
     app_base_url: Option<String>,
     invite_token_ttl_seconds: Option<u64>,
     bootstrap_admin_email: Option<String>,
