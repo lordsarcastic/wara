@@ -750,45 +750,19 @@ storage_ty = "Uuid"
 
 [[schema.tables.columns]]
 id = { table = 13, index = 2 }
-name = "token_hash"
-ty = "String"
-storage_ty = "Text"
-
-[[schema.tables.columns]]
-id = { table = 13, index = 3 }
-name = "token_prefix"
-ty = "String"
-storage_ty = "Text"
-
-[[schema.tables.columns]]
-id = { table = 13, index = 4 }
 name = "created_at"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 13, index = 5 }
+id = { table = 13, index = 3 }
 name = "expires_at"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 13, index = 6 }
+id = { table = 13, index = 4 }
 name = "revoked_at"
-ty = "Option<String>"
-storage_ty = "Text"
-nullable = true
-
-[[schema.tables.columns]]
-id = { table = 13, index = 7 }
-name = "replaced_by_token_id"
-ty = "Option<String>"
-storage_ty = "Text"
-nullable = true
-
-[[schema.tables.columns]]
-id = { table = 13, index = 8 }
-name = "last_used_at"
 ty = "Option<String>"
 storage_ty = "Text"
 nullable = true
@@ -806,10 +780,3 @@ id = { table = 13, index = 1 }
 name = "index_user_refresh_token_records_by_user_id"
 on = 13
 columns = [{ column = { table = 13, index = 1 }, op = "Eq", scope = "Partition" }]
-
-[[schema.tables.indices]]
-id = { table = 13, index = 2 }
-name = "index_user_refresh_token_records_by_token_hash"
-on = 13
-columns = [{ column = { table = 13, index = 2 }, op = "Eq", scope = "Partition" }]
-unique = true

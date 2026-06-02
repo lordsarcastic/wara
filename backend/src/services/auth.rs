@@ -288,23 +288,19 @@ impl AuthService {
         }
         let user = self.user_from_record(user_record).await?;
 
-        let raw_refresh_token = generate_refresh_token();
-        let token_hash = hash_refresh_token(&raw_refresh_token);
+        let new_record_id = Uuid::now_v7();
+        let raw_refresh_token = generate_refresh_token(new_record_id, &self.config.secret_key);
         let now = Utc::now();
         let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
 
         let mut db = self.db.handle()?;
         let mut tx = db.transaction().await.map_err(map_toasty_error)?;
         let new_record = toasty::create!(UserRefreshTokenRecord {
-            id: Uuid::now_v7(),
+            id: new_record_id,
             user_id: user.id,
-            token_hash,
-            token_prefix: token_prefix(&raw_refresh_token),
             created_at: now.to_rfc3339(),
             expires_at: expires_at.to_rfc3339(),
             revoked_at: None,
-            replaced_by_token_id: None,
-            last_used_at: None,
         })
         .exec(&mut tx)
         .await
@@ -315,9 +311,7 @@ impl AuthService {
         >::filter(
             UserRefreshTokenRecord::fields().id().eq(record.id),
         ));
-        update_old.set(6, now.to_rfc3339());
-        update_old.set(7, new_record.id.to_string());
-        update_old.set(8, now.to_rfc3339());
+        update_old.set(4, now.to_rfc3339());
         update_old.set_returning_none();
         update_old.exec(&mut tx).await.map_err(map_toasty_error)?;
         tx.commit().await.map_err(map_toasty_error)?;
@@ -340,7 +334,7 @@ impl AuthService {
         >::filter(
             UserRefreshTokenRecord::fields().id().eq(record.id),
         ));
-        update_token.set(6, Utc::now().to_rfc3339());
+        update_token.set(4, Utc::now().to_rfc3339());
         update_token.set_returning_none();
         update_token.exec(&mut db).await.map_err(map_toasty_error)?;
         Ok(())
@@ -455,20 +449,17 @@ impl AuthService {
     }
 
     async fn create_refresh_token(&self, user_id: Uuid) -> Result<RefreshTokenIssue, ApiError> {
-        let raw_token = generate_refresh_token();
+        let id = Uuid::now_v7();
+        let raw_token = generate_refresh_token(id, &self.config.secret_key);
         let now = Utc::now();
         let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
         let mut db = self.db.handle()?;
         let record = toasty::create!(UserRefreshTokenRecord {
-            id: Uuid::now_v7(),
+            id,
             user_id,
-            token_hash: hash_refresh_token(&raw_token),
-            token_prefix: token_prefix(&raw_token),
             created_at: now.to_rfc3339(),
             expires_at: expires_at.to_rfc3339(),
             revoked_at: None,
-            replaced_by_token_id: None,
-            last_used_at: None,
         })
         .exec(&mut db)
         .await
@@ -487,10 +478,10 @@ impl AuthService {
             return Err(ApiError::Unauthorized);
         }
 
-        let token_hash = hash_refresh_token(token);
+        let token_id = parse_refresh_token_id(token, &self.config.secret_key)?;
         let mut db = self.db.handle()?;
         let record = Query::<List<UserRefreshTokenRecord>>::filter(
-            UserRefreshTokenRecord::fields().token_hash().eq(token_hash),
+            UserRefreshTokenRecord::fields().id().eq(token_id),
         )
         .first()
         .exec(&mut db)
@@ -751,10 +742,12 @@ fn generate_api_token() -> String {
     format!("wara_{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn generate_refresh_token() -> String {
+fn generate_refresh_token(id: Uuid, secret_key: &str) -> String {
     let mut bytes = [0_u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
-    format!("wara_refresh_{}", URL_SAFE_NO_PAD.encode(bytes))
+    let nonce = URL_SAFE_NO_PAD.encode(bytes);
+    let mac = refresh_token_mac(id, &nonce, secret_key);
+    format!("wara_refresh_{id}.{nonce}.{mac}")
 }
 
 fn hash_invite_token(token: &str) -> String {
@@ -765,8 +758,34 @@ fn hash_api_token(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
 
-fn hash_refresh_token(token: &str) -> String {
-    URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+fn parse_refresh_token_id(token: &str, secret_key: &str) -> Result<Uuid, ApiError> {
+    let value = token
+        .strip_prefix("wara_refresh_")
+        .ok_or(ApiError::Unauthorized)?;
+    let mut parts = value.split('.');
+    let id = parts
+        .next()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or(ApiError::Unauthorized)?;
+    let nonce = parts.next().ok_or(ApiError::Unauthorized)?;
+    let mac = parts.next().ok_or(ApiError::Unauthorized)?;
+    if parts.next().is_some() {
+        return Err(ApiError::Unauthorized);
+    }
+    if mac != refresh_token_mac(id, nonce, secret_key) {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(id)
+}
+
+fn refresh_token_mac(id: Uuid, nonce: &str, secret_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret_key.as_bytes());
+    hasher.update(b":");
+    hasher.update(id.as_bytes());
+    hasher.update(b":");
+    hasher.update(nonce.as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
 fn token_prefix(token: &str) -> String {

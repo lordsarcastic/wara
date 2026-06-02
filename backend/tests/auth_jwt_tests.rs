@@ -117,7 +117,7 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
 }
 
 #[tokio::test]
-async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
+async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() {
     let Some(database_url) = Config::from_env().test_database_url else {
         eprintln!("skipping Toasty integration test; set WARA_TEST_DATABASE_URL to run it");
         return;
@@ -175,16 +175,9 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
     .await
     .expect("list refresh token records");
     assert_eq!(issued_records.len(), 1);
-    assert_eq!(
-        issued_records[0].token_prefix,
-        expired_refresh_token.chars().take(12).collect::<String>()
-    );
-    assert_ne!(issued_records[0].token_hash, expired_refresh_token);
     assert!(
-        !issued_records[0]
-            .token_hash
-            .contains(&expired_refresh_token),
-        "plaintext refresh token must not be stored"
+        !expired_refresh_token.contains(&issued_records[0].user_id.to_string()),
+        "refresh token must not expose unrelated record fields"
     );
     let first_claims = decode_access_claims(&config, first_access_token);
     assert!(Uuid::parse_str(&first_claims.jti).is_ok());
@@ -197,7 +190,7 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
                 .eq(issued_records[0].id),
         ),
     );
-    expire_token.set(5, chrono::Utc::now().to_rfc3339());
+    expire_token.set(3, chrono::Utc::now().to_rfc3339());
     expire_token.set_returning_none();
     expire_token
         .exec(&mut db_handle)
@@ -250,6 +243,22 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
         .unwrap();
     assert_eq!(unknown_response.status(), StatusCode::UNAUTHORIZED);
 
+    let tampered_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{expired_refresh_token}tampered"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tampered_response.status(), StatusCode::UNAUTHORIZED);
+
     let active_login_body =
         login_response(&app, "refresh-admin@wara.local", "correct-password").await;
     let active_access_token = active_login_body["token"]
@@ -296,26 +305,21 @@ async fn refresh_tokens_are_hashed_rotated_expirable_and_revocable() {
     .exec(&mut db_handle)
     .await
     .expect("list rotated refresh token records");
+    let active_claims = decode_access_claims(&config, active_access_token);
     let revoked_old = records
         .iter()
-        .find(|record| {
-            record.token_prefix == active_refresh_token.chars().take(12).collect::<String>()
-        })
+        .find(|record| record.id.to_string() == active_claims.ret)
         .expect("old refresh token record");
     assert!(revoked_old.revoked_at.is_some());
-    assert!(revoked_old.replaced_by_token_id.is_some());
-    assert!(revoked_old.last_used_at.is_some());
-    let active_claims = decode_access_claims(&config, active_access_token);
     assert_eq!(active_claims.ret, revoked_old.id.to_string());
+    assert!(active_refresh_token.contains(&active_claims.ret));
+    let rotated_claims = decode_access_claims(&config, rotated_access_token);
     let active_new = records
         .iter()
-        .find(|record| {
-            record.token_prefix == rotated_refresh_token.chars().take(12).collect::<String>()
-        })
+        .find(|record| record.id.to_string() == rotated_claims.ret)
         .expect("rotated refresh token record");
     assert!(active_new.revoked_at.is_none());
-    assert_ne!(active_new.token_hash, rotated_refresh_token);
-    let rotated_claims = decode_access_claims(&config, rotated_access_token);
+    assert!(rotated_refresh_token.contains(&rotated_claims.ret));
     assert!(Uuid::parse_str(&rotated_claims.jti).is_ok());
     assert_ne!(rotated_claims.jti, active_claims.jti);
     assert_eq!(rotated_claims.ret, active_new.id.to_string());
