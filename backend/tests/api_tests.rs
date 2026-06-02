@@ -3,6 +3,8 @@ use axum::{
     http::{Method, Request, StatusCode},
     response::Response,
 };
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower::ServiceExt;
 use utoipa::OpenApi;
@@ -12,6 +14,17 @@ use wara_backend::{
     routes,
     state::AppState,
 };
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TestClaims {
+    sub: String,
+    email: String,
+    role: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
 
 fn app() -> axum::Router {
     let state = AppState::new(Config::from_env(), Database::unavailable_for_tests());
@@ -116,14 +129,14 @@ async fn unmatched_api_routes_use_error_envelope() {
 
 #[tokio::test]
 async fn internal_errors_are_redacted_in_error_envelope() {
-    let mut config = Config::from_env();
-    config.jwt_public_key_pem = "not a valid public key".to_string();
+    let config = Config::from_env();
+    let token = sign_test_jwt(&config);
     let state = AppState::new(config, Database::unavailable_for_tests());
     let response = routes::router(state)
         .oneshot(
             Request::builder()
                 .uri("/api/v1/auth/me")
-                .header("authorization", "Bearer malformed")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -136,6 +149,24 @@ async fn internal_errors_are_redacted_in_error_envelope() {
         !body.to_string().contains("public key"),
         "internal details must not leak: {body}"
     );
+}
+
+fn sign_test_jwt(config: &Config) -> String {
+    let now = get_current_timestamp();
+    let claims = TestClaims {
+        sub: uuid::Uuid::now_v7().to_string(),
+        email: "redacted-error@wara.local".to_string(),
+        role: "super_admin".to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.jwt_audience.clone(),
+        iat: now,
+        exp: now + config.jwt_access_token_ttl_seconds,
+    };
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(uuid::Uuid::now_v7().to_string());
+    let key = EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
+        .expect("test private key should parse");
+    encode(&header, &claims, &key).expect("sign test JWT")
 }
 
 #[tokio::test]

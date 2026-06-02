@@ -1,6 +1,9 @@
 use std::{fs, path::PathBuf};
 
-use serde::Deserialize;
+use jsonwebtoken::{
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, get_current_timestamp,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::libs::docker::{DEFAULT_DOCKERFILE_CONTEXT_DIR, DEFAULT_REMOTE_SERVICES_ROOT};
 
@@ -41,6 +44,15 @@ Qt3dU+OXkYdnvEXy79ORpKSpR6JKW/gDQ3cuxavgyJ8d1Xd7fiI6OX/iimsQCTDZ
 CANrHvQYI4/gmhRTv53ypyFRWA0sN4FKbEazCSP1dZFV07GCAAR/hTy+xOudgde9
 +QIDAQAB
 -----END PUBLIC KEY-----"#;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JwtKeyProbeClaims {
+    sub: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEnvironment {
@@ -86,7 +98,7 @@ pub struct Config {
     pub remote_services_root: String,
     pub dockerfile_context_dir: String,
     pub jwt_private_key_pem: String,
-    pub jwt_public_key_pem: String,
+    pub jwt_public_key: String,
     pub jwt_issuer: String,
     pub jwt_audience: String,
     pub jwt_access_token_ttl_seconds: u64,
@@ -137,6 +149,16 @@ impl Config {
             file.app_env,
             "development".to_string(),
         ));
+        let jwt_private_key_pem = non_empty_setting(
+            "WARA_JWT_PRIVATE_KEY_PEM",
+            file.jwt_private_key_pem,
+            DEFAULT_JWT_PRIVATE_KEY_PEM.to_string(),
+        );
+        let jwt_public_key = non_empty_setting(
+            "WARA_JWT_PUBLIC_KEY",
+            file.jwt_public_key,
+            DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
+        );
         Self {
             app_env,
             config_file: config_path(),
@@ -171,16 +193,8 @@ impl Config {
                 file.dockerfile_context_dir,
                 DEFAULT_DOCKERFILE_CONTEXT_DIR.to_string(),
             ),
-            jwt_private_key_pem: setting(
-                "WARA_JWT_PRIVATE_KEY_PEM",
-                file.jwt_private_key_pem,
-                DEFAULT_JWT_PRIVATE_KEY_PEM.to_string(),
-            ),
-            jwt_public_key_pem: setting(
-                "WARA_JWT_PUBLIC_KEY_PEM",
-                file.jwt_public_key_pem,
-                DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
-            ),
+            jwt_private_key_pem,
+            jwt_public_key,
             jwt_issuer: setting("WARA_JWT_ISSUER", file.jwt_issuer, "wara".to_string()),
             jwt_audience: setting(
                 "WARA_JWT_AUDIENCE",
@@ -323,6 +337,48 @@ impl Config {
             test_database_url: optional_setting("WARA_TEST_DATABASE_URL", file.test_database_url),
         }
     }
+
+    pub fn validate_jwt_key_config(&self) -> anyhow::Result<()> {
+        if self.jwt_private_key_pem.trim().is_empty() {
+            anyhow::bail!("WARA_JWT_PRIVATE_KEY_PEM must not be empty");
+        }
+        EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes())
+            .map_err(|error| anyhow::anyhow!("invalid active JWT private key PEM: {error}"))?;
+        if self.jwt_public_key.trim().is_empty() {
+            anyhow::bail!("WARA_JWT_PUBLIC_KEY must not be empty");
+        }
+        DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes())
+            .map_err(|error| anyhow::anyhow!("invalid JWT public key PEM: {error}"))?;
+
+        self.verify_active_private_key_matches_public_key()
+    }
+
+    fn verify_active_private_key_matches_public_key(&self) -> anyhow::Result<()> {
+        let signing_key = EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes())
+            .map_err(|error| anyhow::anyhow!("invalid active JWT private key PEM: {error}"))?;
+        let verification_key = DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes())
+            .map_err(|error| anyhow::anyhow!("invalid JWT public key PEM: {error}"))?;
+
+        let now = get_current_timestamp();
+        let claims = JwtKeyProbeClaims {
+            sub: "jwt-key-config-probe".to_string(),
+            iss: self.jwt_issuer.clone(),
+            aud: self.jwt_audience.clone(),
+            iat: now,
+            exp: now + 60,
+        };
+        let header = Header::new(Algorithm::RS256);
+        let token = encode(&header, &claims, &signing_key)
+            .map_err(|error| anyhow::anyhow!("failed to sign JWT key config probe: {error}"))?;
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[self.jwt_audience.as_str()]);
+        validation.set_issuer(&[self.jwt_issuer.as_str()]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+        decode::<JwtKeyProbeClaims>(&token, &verification_key, &validation).map_err(|error| {
+            anyhow::anyhow!("active JWT private key does not match configured public key: {error}")
+        })?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -340,7 +396,7 @@ struct ConfigFile {
     remote_services_root: Option<String>,
     dockerfile_context_dir: Option<String>,
     jwt_private_key_pem: Option<String>,
-    jwt_public_key_pem: Option<String>,
+    jwt_public_key: Option<String>,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
     jwt_access_token_ttl_seconds: Option<u64>,
@@ -413,6 +469,14 @@ fn setting(env_name: &str, file_value: Option<String>, default: String) -> Strin
         .unwrap_or(default)
 }
 
+fn non_empty_setting(env_name: &str, file_value: Option<String>, default: String) -> String {
+    std::env::var(env_name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| file_value.filter(|value| !value.trim().is_empty()))
+        .unwrap_or(default)
+}
+
 fn optional_setting(env_name: &str, file_value: Option<String>) -> Option<String> {
     std::env::var(env_name).ok().or(file_value)
 }
@@ -453,6 +517,16 @@ fn parse_bool(value: &str) -> Option<bool> {
 mod tests {
     use super::*;
 
+    const OTHER_PUBLIC_KEY_PEM: &str = r#"-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1xMD1mfaGMf+CBhoGr3Y
+RQxaKIZEIEOUhLrZLoGLb4ZHy2PTzPjK/7gMlwpovLYGG6WZAhCd6j2qjZUsC5r+
+Rzt90ZnQmiIhynpVwG50KVAzvqG1EokCqncull+gKfDcjcMKfK3mUzvh6MHaAyeN
+2AiXRvqpp/EOQJ5ui1+QN2R6/mH4zUFs1mvh5PVqnDOxT7I7kQc03qYvYYgOBNQU
+0GcmMWfA+/B66KUmtzuYbkyEbKYtMTGyW0pB9OCj13tgPzSWxtn6//kXM2i9yfxJ
+R/oF4bevR/1LViq091xwXLz+u5c+Cj+YoTZ9oy6YGP9KkHvgAGpX1fWHe7H5SxzI
+tQIDAQAB
+-----END PUBLIC KEY-----"#;
+
     #[test]
     fn config_file_values_fill_defaults() {
         // The loader gives environment variables precedence over file values, so the
@@ -465,6 +539,8 @@ mod tests {
             "WARA_TELEMETRY_ENABLED",
             "WARA_REMOTE_SERVICES_ROOT",
             "WARA_DOCKERFILE_CONTEXT_DIR",
+            "WARA_JWT_PRIVATE_KEY_PEM",
+            "WARA_JWT_PUBLIC_KEY",
             "TEMPORAL_NAMESPACE",
             "OTEL_SERVICE_NAME",
         ];
@@ -506,6 +582,42 @@ mod tests {
         assert_eq!(config.temporal_namespace, "wara");
         assert_eq!(config.otel_service_name, "wara-backend");
         assert!(!config.db_push_schema);
+    }
+
+    #[test]
+    fn default_jwt_key_config_validates() {
+        let config = Config::from_sources(ConfigFile::default());
+
+        config
+            .validate_jwt_key_config()
+            .expect("default JWT key config should validate");
+        assert_eq!(config.jwt_public_key, DEFAULT_JWT_PUBLIC_KEY_PEM);
+    }
+
+    #[test]
+    fn malformed_jwt_public_key_is_rejected() {
+        let config = Config::from_sources(ConfigFile {
+            jwt_public_key: Some("not a public key".to_string()),
+            ..ConfigFile::default()
+        });
+
+        let error = config
+            .validate_jwt_key_config()
+            .expect_err("malformed JWT public key should fail");
+        assert!(error.to_string().contains("invalid JWT public"));
+    }
+
+    #[test]
+    fn mismatched_active_jwt_key_material_is_rejected() {
+        let config = Config::from_sources(ConfigFile {
+            jwt_public_key: Some(OTHER_PUBLIC_KEY_PEM.to_string()),
+            ..ConfigFile::default()
+        });
+
+        let error = config
+            .validate_jwt_key_config()
+            .expect_err("mismatched active JWT key material should fail");
+        assert!(error.to_string().contains("does not match"));
     }
 
     #[test]

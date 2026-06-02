@@ -13,6 +13,7 @@ use wara_backend::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
+    config.validate_jwt_key_config()?;
     let telemetry_guard = telemetry::init(&config)?;
     let db = db::connect(&config).await?;
     AuthService::new(db.clone(), config.clone())

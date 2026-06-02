@@ -75,6 +75,39 @@ Environment variables override config file values. See:
 - [.env.example](./.env.example)
 - [docs/config.example.yml](./docs/config.example.yml)
 
+JWT access and refresh tokens are signed with `WARA_JWT_PRIVATE_KEY_PEM`. On
+startup Wara reads `WARA_JWT_PUBLIC_KEY`, stores it in the database as JWK
+components (`kid`, `kty`, `use`, `alg`, `n`, `e`), and marks that row active.
+The generated/stored UUIDv7 row id is written into each token header as `kid`.
+Older DB rows are marked inactive, but remain available for verification while
+tokens signed by them expire.
+
+Clients can fetch the active public key set from:
+
+```text
+/.well-known/jwks.json
+```
+
+Generate a new local keypair with:
+
+```bash
+scripts/generate-jwt-keypair.sh
+```
+
+The helper writes PEM files and environment/YAML snippets with restrictive file
+permissions. It generates a UUIDv7 key id when one is not provided and does not
+print private key material to stdout.
+
+JWT signing key rotation is an operator deployment procedure, not an application
+API:
+
+1. Generate a new keypair locally with the helper script.
+2. Set `WARA_JWT_PRIVATE_KEY_PEM` and `WARA_JWT_PUBLIC_KEY` to the new pair.
+3. Restart or roll the backend so every instance stores the new public key as
+   active and signs new tokens with its DB `kid`.
+4. Wait for tokens signed by the old key to expire.
+5. Remove expired inactive keys from the database when they are no longer needed.
+
 For development, the default bootstrapped admin is:
 
 - Email: `admin@wara.local`
