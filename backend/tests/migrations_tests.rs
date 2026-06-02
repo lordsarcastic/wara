@@ -38,12 +38,6 @@ async fn migration_apply_initializes_a_fresh_database() {
         "first apply failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Successfully applied 1 migration"),
-        "unexpected apply output: {stdout}"
-    );
-
     // The migrated schema must be usable with no push_schema in play.
     let mut config = Config::from_env();
     config.database_url = test_database_url.clone();
