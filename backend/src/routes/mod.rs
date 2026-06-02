@@ -1,7 +1,12 @@
-use axum::{Router, routing::get};
+use axum::{Router, middleware, routing::get};
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::{libs::metrics, openapi::ApiDoc, state::AppState};
+use crate::{
+    errors::{ApiError, normalize_error_response},
+    libs::metrics,
+    openapi::ApiDoc,
+    state::AppState,
+};
 use utoipa::OpenApi;
 
 pub mod admin;
@@ -28,7 +33,9 @@ pub fn router(state: AppState) -> Router {
         .merge(deployments::router())
         .merge(templates::router())
         .merge(telemetry::router())
-        .merge(admin::router());
+        .merge(admin::router())
+        .fallback(api_not_found)
+        .layer(middleware::from_fn(normalize_error_response));
 
     let mut app = Router::new()
         .route("/health", get(health))
@@ -55,4 +62,8 @@ pub async fn health() -> &'static str {
 
 pub async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
     axum::Json(ApiDoc::openapi())
+}
+
+async fn api_not_found() -> Result<(), ApiError> {
+    Err(ApiError::NotFound("route"))
 }
