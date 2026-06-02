@@ -75,6 +75,34 @@ Environment variables override config file values. See:
 - [.env.example](./.env.example)
 - [docs/config.example.yml](./docs/config.example.yml)
 
+JWT access tokens are signed with the private key configured by
+`WARA_JWT_ACTIVE_KEY_ID` and `WARA_JWT_PRIVATE_KEY_PEM`. Verification uses
+`WARA_JWT_PUBLIC_KEYS`, a JSON array of public keys keyed by `id`. If
+`WARA_JWT_PUBLIC_KEYS` is not set, Wara falls back to the legacy single
+`WARA_JWT_PUBLIC_KEY_PEM` value under the active key id.
+
+Generate a new local keypair with:
+
+```bash
+scripts/generate-jwt-keypair.sh jwt-2026-06
+```
+
+The helper writes PEM files and environment/YAML snippets with restrictive file
+permissions. It does not print private key material to stdout.
+
+JWT signing key rotation is an operator deployment procedure, not an application
+API:
+
+1. Generate a new keypair locally with the helper script.
+2. Add the new public key to `WARA_JWT_PUBLIC_KEYS` while keeping the old active
+   signing key.
+3. Restart or roll the backend so every instance can verify old and new keys.
+4. Set `WARA_JWT_ACTIVE_KEY_ID` and `WARA_JWT_PRIVATE_KEY_PEM` to the new key.
+5. Restart or roll the backend again so new access tokens use the new `kid`.
+6. Wait for access tokens signed by the old key to expire.
+7. Remove the old public key from `WARA_JWT_PUBLIC_KEYS`.
+8. Restart or roll the backend one final time.
+
 For development, the default bootstrapped admin is:
 
 - Email: `admin@wara.local`

@@ -2,11 +2,17 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower::ServiceExt;
 use uuid::Uuid;
 use wara_backend::{
-    libs::{config::Config, db, docker::DeployKind},
+    libs::{
+        config::{Config, DEFAULT_JWT_PUBLIC_KEY_PEM, JwtVerificationKeyConfig},
+        db,
+        docker::DeployKind,
+    },
     models::users::{Role, UserApiTokenRecord, WorkspaceUserRoleRecord},
     routes,
     services::{
@@ -16,6 +22,17 @@ use wara_backend::{
     },
     state::AppState,
 };
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TestClaims {
+    sub: String,
+    email: String,
+    role: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
 
 #[tokio::test]
 async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
@@ -31,13 +48,23 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     config.bootstrap_admin_email = "admin-auth@wara.local".to_string();
     config.bootstrap_admin_password = "correct-password".to_string();
     config.bootstrap_admin_name = "Auth Admin".to_string();
+    config.jwt_public_keys = vec![
+        JwtVerificationKeyConfig {
+            id: "old".to_string(),
+            public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
+        },
+        JwtVerificationKeyConfig {
+            id: config.jwt_active_key_id.clone(),
+            public_key_pem: DEFAULT_JWT_PUBLIC_KEY_PEM.to_string(),
+        },
+    ];
 
     let database = db::connect(&config).await.expect("connect test database");
     AuthService::new(database.clone(), config.clone())
         .bootstrap_admin()
         .await
         .expect("bootstrap admin");
-    let app = routes::router(AppState::new(config, database));
+    let app = routes::router(AppState::new(config.clone(), database));
 
     let login_response = app
         .clone()
@@ -57,6 +84,11 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     let login_body = response_json(login_response).await;
     let token = login_body["token"].as_str().expect("jwt token");
     assert_eq!(token.split('.').count(), 3);
+    let header = jsonwebtoken::decode_header(token).expect("decode JWT header");
+    assert_eq!(
+        header.kid.as_deref(),
+        Some(config.jwt_active_key_id.as_str())
+    );
 
     let me_response = app
         .clone()
@@ -73,6 +105,70 @@ async fn login_issues_asymmetric_jwt_and_me_verifies_it() {
     let me_body = response_json(me_response).await;
     assert_eq!(me_body["email"], "admin-auth@wara.local");
     assert_eq!(me_body["role"], "super_admin");
+    let user_id = me_body["id"].as_str().expect("user id");
+
+    let old_key_token = sign_test_jwt(
+        &config,
+        "old",
+        user_id,
+        "admin-auth@wara.local",
+        "super_admin",
+        true,
+    );
+    let old_key_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", format!("Bearer {old_key_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old_key_response.status(), StatusCode::OK);
+
+    let unknown_key_token = sign_test_jwt(
+        &config,
+        "unknown",
+        user_id,
+        "admin-auth@wara.local",
+        "super_admin",
+        true,
+    );
+    let unknown_key_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", format!("Bearer {unknown_key_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_key_response.status(), StatusCode::UNAUTHORIZED);
+
+    let missing_key_id_token = sign_test_jwt(
+        &config,
+        "missing",
+        user_id,
+        "admin-auth@wara.local",
+        "super_admin",
+        false,
+    );
+    let missing_key_id_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", format!("Bearer {missing_key_id_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_key_id_response.status(), StatusCode::UNAUTHORIZED);
 
     let tampered_response = app
         .oneshot(
@@ -762,6 +858,33 @@ async fn response_json(response: axum::response::Response) -> Value {
         .await
         .expect("read response body");
     serde_json::from_slice(&bytes).expect("parse response JSON")
+}
+
+fn sign_test_jwt(
+    config: &Config,
+    key_id: &str,
+    user_id: &str,
+    email: &str,
+    role: &str,
+    include_key_id: bool,
+) -> String {
+    let now = get_current_timestamp();
+    let claims = TestClaims {
+        sub: user_id.to_string(),
+        email: email.to_string(),
+        role: role.to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.jwt_audience.clone(),
+        iat: now,
+        exp: now + config.jwt_access_token_ttl_seconds,
+    };
+    let mut header = Header::new(Algorithm::RS256);
+    if include_key_id {
+        header.kid = Some(key_id.to_string());
+    }
+    let key = EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
+        .expect("test private key should parse");
+    encode(&header, &claims, &key).expect("sign test JWT")
 }
 
 async fn login(app: &axum::Router, email: &str, password: &str) -> String {

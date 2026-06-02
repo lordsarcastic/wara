@@ -14,6 +14,7 @@ db_push_schema: false
 docs_enabled: true
 remote_services_root: /opt/wara/services
 dockerfile_context_dir: context
+jwt_active_key_id: default
 jwt_private_key_pem: |
   -----BEGIN RSA PRIVATE KEY-----
   replace-with-your-private-key
@@ -22,6 +23,12 @@ jwt_public_key_pem: |
   -----BEGIN PUBLIC KEY-----
   replace-with-your-public-key
   -----END PUBLIC KEY-----
+jwt_public_keys:
+  - id: default
+    public_key_pem: |
+      -----BEGIN PUBLIC KEY-----
+      replace-with-your-public-key
+      -----END PUBLIC KEY-----
 jwt_issuer: wara
 jwt_audience: wara-api
 jwt_access_token_ttl_seconds: 900

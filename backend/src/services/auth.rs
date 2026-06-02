@@ -9,7 +9,8 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, get_current_timestamp,
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
+    get_current_timestamp,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -472,13 +473,22 @@ impl AuthService {
         };
         let key = EncodingKey::from_rsa_pem(self.config.jwt_private_key_pem.as_bytes())
             .map_err(|error| ApiError::Internal(format!("invalid JWT private key: {error}")))?;
-        encode(&Header::new(Algorithm::RS256), &claims, &key)
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(self.config.jwt_active_key_id.clone());
+        encode(&header, &claims, &key)
             .map_err(|error| ApiError::Internal(format!("failed to sign JWT: {error}")))
     }
 
     fn verify_access_token(&self, token: &str) -> Result<Claims, ApiError> {
-        let key = DecodingKey::from_rsa_pem(self.config.jwt_public_key_pem.as_bytes())
-            .map_err(|error| ApiError::Internal(format!("invalid JWT public key: {error}")))?;
+        let header = decode_header(token).map_err(|_| ApiError::Unauthorized)?;
+        let key_id = header.kid.ok_or(ApiError::Unauthorized)?;
+        let public_key = self
+            .config
+            .jwt_public_key_for_id(&key_id)
+            .ok_or(ApiError::Unauthorized)?;
+        let key = DecodingKey::from_rsa_pem(public_key.as_bytes()).map_err(|error| {
+            ApiError::Internal(format!("invalid JWT public key for {key_id}: {error}"))
+        })?;
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&[self.config.jwt_audience.as_str()]);
         validation.set_issuer(&[self.config.jwt_issuer.as_str()]);
