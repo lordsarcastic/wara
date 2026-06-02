@@ -30,6 +30,7 @@ pub struct WorkspaceRole {
 pub enum UserStatus {
     Invited,
     Active,
+    Disabled,
 }
 
 impl UserStatus {
@@ -37,6 +38,7 @@ impl UserStatus {
         match self {
             Self::Invited => "invited",
             Self::Active => "active",
+            Self::Disabled => "disabled",
         }
     }
 }
@@ -45,6 +47,7 @@ impl From<&str> for UserStatus {
     fn from(value: &str) -> Self {
         match value {
             "active" => Self::Active,
+            "disabled" => Self::Disabled,
             _ => Self::Invited,
         }
     }

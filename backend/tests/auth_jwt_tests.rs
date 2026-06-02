@@ -290,6 +290,255 @@ async fn api_tokens_are_shown_once_hashed_revocable_and_authorized_like_users() 
 }
 
 #[tokio::test]
+async fn platform_admins_can_manage_users_and_disabled_users_lose_access() {
+    let Some(database_url) = Config::from_env().test_database_url else {
+        eprintln!("skipping Toasty integration test; set WARA_TEST_DATABASE_URL to run it");
+        return;
+    };
+
+    let test_database_url = create_isolated_database(&database_url).await;
+    let mut config = Config::from_env();
+    config.database_url = test_database_url.clone();
+    config.db_push_schema = true;
+    config.bootstrap_admin_email = "user-admin-root@wara.local".to_string();
+    config.bootstrap_admin_password = "correct-password".to_string();
+    config.bootstrap_admin_name = "User Admin Root".to_string();
+    config.app_base_url = "http://localhost:4200".to_string();
+
+    let database = db::connect(&config).await.expect("connect test database");
+    AuthService::new(database.clone(), config.clone())
+        .bootstrap_admin()
+        .await
+        .expect("bootstrap admin");
+    let workspace = WorkspaceService::new(database.clone())
+        .create_workspace("User management workspace".to_string(), None)
+        .await
+        .expect("create workspace");
+    let app = routes::router(AppState::new(config, database));
+
+    let root_login = login_response(&app, "user-admin-root@wara.local", "correct-password").await;
+    let root_token = root_login["token"]
+        .as_str()
+        .expect("root token")
+        .to_string();
+    let root_user_id = root_login["user"]["id"]
+        .as_str()
+        .expect("root user id")
+        .to_string();
+    let viewer_token = invite_accept_and_token(
+        &app,
+        &root_token,
+        workspace.id,
+        "managed-viewer@wara.local",
+        Role::Viewer,
+    )
+    .await;
+    let viewer_me_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let viewer_me = response_json(viewer_me_response).await;
+    let viewer_user_id = viewer_me["id"].as_str().expect("viewer id").to_string();
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/users")
+                .header("authorization", format!("Bearer {root_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let users = response_json(list_response).await;
+    assert!(
+        users
+            .as_array()
+            .expect("users list")
+            .iter()
+            .any(|user| user["email"] == "managed-viewer@wara.local"
+                && user["status"] == "active"
+                && user["role"] == "viewer")
+    );
+
+    let last_admin_disable_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/admin/users/{root_user_id}/disable"))
+                .header("authorization", format!("Bearer {root_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        last_admin_disable_response.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let last_admin_role_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/admin/users/{root_user_id}/role"))
+                .header("authorization", format!("Bearer {root_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"role":"viewer"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(last_admin_role_response.status(), StatusCode::BAD_REQUEST);
+
+    let create_api_token_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/api-tokens")
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Disabled user token"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_api_token_response.status(), StatusCode::OK);
+    let viewer_api_token = response_json(create_api_token_response).await["token"]
+        .as_str()
+        .expect("viewer api token")
+        .to_string();
+
+    let non_admin_disable_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/admin/users/{root_user_id}/disable"))
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(non_admin_disable_response.status(), StatusCode::FORBIDDEN);
+
+    let disable_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/admin/users/{viewer_user_id}/disable"))
+                .header("authorization", format!("Bearer {root_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disable_response.status(), StatusCode::OK);
+    let disabled_user = response_json(disable_response).await;
+    assert_eq!(disabled_user["status"], "disabled");
+
+    let disabled_login_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"email":"managed-viewer@wara.local","password":"new-password"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disabled_login_response.status(), StatusCode::UNAUTHORIZED);
+
+    let disabled_jwt_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disabled_jwt_response.status(), StatusCode::UNAUTHORIZED);
+
+    let disabled_api_token_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header("authorization", format!("Bearer {viewer_api_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        disabled_api_token_response.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let reactivate_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/admin/users/{viewer_user_id}/reactivate"))
+                .header("authorization", format!("Bearer {root_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reactivate_response.status(), StatusCode::OK);
+    let reactivated_user = response_json(reactivate_response).await;
+    assert_eq!(reactivated_user["status"], "active");
+
+    let relogin_response = login_response(&app, "managed-viewer@wara.local", "new-password").await;
+    let reactivated_token = relogin_response["token"]
+        .as_str()
+        .expect("reactivated token");
+    assert_eq!(reactivated_token.split('.').count(), 3);
+
+    let role_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/admin/users/{viewer_user_id}/role"))
+                .header("authorization", format!("Bearer {root_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"role":"admin"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(role_response.status(), StatusCode::OK);
+    let promoted_user = response_json(role_response).await;
+    assert_eq!(promoted_user["role"], "admin");
+
+    drop_isolated_database(&test_database_url).await;
+}
+
+#[tokio::test]
 async fn admin_can_invite_user_and_user_accepts_once() {
     let Some(database_url) = Config::from_env().test_database_url else {
         eprintln!("skipping Toasty integration test; set WARA_TEST_DATABASE_URL to run it");
@@ -765,6 +1014,13 @@ async fn response_json(response: axum::response::Response) -> Value {
 }
 
 async fn login(app: &axum::Router, email: &str, password: &str) -> String {
+    login_response(app, email, password).await["token"]
+        .as_str()
+        .expect("login token")
+        .to_string()
+}
+
+async fn login_response(app: &axum::Router, email: &str, password: &str) -> Value {
     let response = app
         .clone()
         .oneshot(
@@ -780,10 +1036,7 @@ async fn login(app: &axum::Router, email: &str, password: &str) -> String {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    response_json(response).await["token"]
-        .as_str()
-        .expect("login token")
-        .to_string()
+    response_json(response).await
 }
 
 async fn invite_accept_and_token(

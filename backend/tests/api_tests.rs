@@ -164,6 +164,9 @@ async fn product_resource_path_ids_must_be_uuids() {
         (Method::POST, "/api/v1/workspaces/not-a-uuid/templates"),
         (Method::POST, "/api/v1/templates/not-a-uuid/workspaces"),
         (Method::DELETE, "/api/v1/auth/api-tokens/not-a-uuid"),
+        (Method::POST, "/api/v1/admin/users/not-a-uuid/disable"),
+        (Method::POST, "/api/v1/admin/users/not-a-uuid/reactivate"),
+        (Method::PATCH, "/api/v1/admin/users/not-a-uuid/role"),
     ];
 
     for (method, uri) in cases {

@@ -76,6 +76,12 @@ pub struct CreateApiTokenOutput {
     pub api_token: UserApiTokenRecord,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChangeUserRoleInput {
+    pub user_id: Uuid,
+    pub role: Role,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
@@ -217,6 +223,9 @@ impl AuthService {
                 "invite has already been accepted".to_string(),
             ));
         }
+        if user.status == UserStatus::Disabled.as_str() {
+            return Err(ApiError::Unauthorized);
+        }
 
         let password_hash = hash_password(&input.password)?;
         let mut db = self.db.handle()?;
@@ -251,7 +260,11 @@ impl AuthService {
         match self.verify_access_token(token) {
             Ok(claims) => {
                 let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
-                self.get_user(user_id).await
+                let user_record = self.get_user_record(user_id).await?;
+                if user_record.status != UserStatus::Active.as_str() {
+                    return Err(ApiError::Unauthorized);
+                }
+                self.user_from_record(user_record).await
             }
             Err(ApiError::Unauthorized) => self.authenticate_api_token(token).await,
             Err(error) => Err(error),
@@ -269,6 +282,56 @@ impl AuthService {
             users.push(self.user_from_record(record).await?);
         }
         Ok(users)
+    }
+
+    pub async fn disable_user(&self, user_id: Uuid) -> Result<User, ApiError> {
+        let record = self.get_user_record(user_id).await?;
+        if record.status == UserStatus::Disabled.as_str() {
+            return self.user_from_record(record).await;
+        }
+        if record.role == Role::SuperAdmin.as_str() && self.active_super_admin_count().await? <= 1 {
+            return Err(ApiError::BadRequest(
+                "cannot disable the last active platform admin".to_string(),
+            ));
+        }
+        self.update_user_status(user_id, UserStatus::Disabled).await
+    }
+
+    pub async fn reactivate_user(&self, user_id: Uuid) -> Result<User, ApiError> {
+        let record = self.get_user_record(user_id).await?;
+        if record.status != UserStatus::Disabled.as_str() {
+            return Err(ApiError::BadRequest(
+                "only disabled users can be reactivated".to_string(),
+            ));
+        }
+        if record.password_hash.is_empty() {
+            return Err(ApiError::BadRequest(
+                "invited users must accept their invite before reactivation".to_string(),
+            ));
+        }
+        self.update_user_status(user_id, UserStatus::Active).await
+    }
+
+    pub async fn change_user_role(&self, input: ChangeUserRoleInput) -> Result<User, ApiError> {
+        let record = self.get_user_record(input.user_id).await?;
+        if record.role == Role::SuperAdmin.as_str()
+            && input.role != Role::SuperAdmin
+            && record.status == UserStatus::Active.as_str()
+            && self.active_super_admin_count().await? <= 1
+        {
+            return Err(ApiError::BadRequest(
+                "cannot remove the last active platform admin".to_string(),
+            ));
+        }
+
+        let mut db = self.db.handle()?;
+        let mut update_user = Update::<List<UserRecord>>::new(Query::<List<UserRecord>>::filter(
+            UserRecord::fields().id().eq(input.user_id),
+        ));
+        update_user.set(3, input.role.as_str());
+        update_user.set_returning_none();
+        update_user.exec(&mut db).await.map_err(map_toasty_error)?;
+        self.get_user(input.user_id).await
     }
 
     pub async fn create_api_token(
@@ -353,6 +416,35 @@ impl AuthService {
         .map_err(map_toasty_error)?
         .ok_or(ApiError::NotFound("api token"))?;
         Ok(record)
+    }
+
+    async fn update_user_status(
+        &self,
+        user_id: Uuid,
+        status: UserStatus,
+    ) -> Result<User, ApiError> {
+        let mut db = self.db.handle()?;
+        let mut update_user = Update::<List<UserRecord>>::new(Query::<List<UserRecord>>::filter(
+            UserRecord::fields().id().eq(user_id),
+        ));
+        update_user.set(4, status.as_str());
+        update_user.set_returning_none();
+        update_user.exec(&mut db).await.map_err(map_toasty_error)?;
+        self.get_user(user_id).await
+    }
+
+    async fn active_super_admin_count(&self) -> Result<usize, ApiError> {
+        let mut db = self.db.handle()?;
+        let records = Query::<List<UserRecord>>::filter(
+            UserRecord::fields().role().eq(Role::SuperAdmin.as_str()),
+        )
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?;
+        Ok(records
+            .into_iter()
+            .filter(|record| record.status == UserStatus::Active.as_str())
+            .count())
     }
 
     async fn get_user(&self, id: Uuid) -> Result<User, ApiError> {

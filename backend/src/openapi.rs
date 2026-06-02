@@ -40,7 +40,10 @@ use utoipa::OpenApi;
         crate::routes::telemetry::get_settings,
         crate::routes::telemetry::update_settings,
         crate::routes::admin::list_users,
-        crate::routes::admin::invite_user
+        crate::routes::admin::invite_user,
+        crate::routes::admin::disable_user,
+        crate::routes::admin::reactivate_user,
+        crate::routes::admin::change_user_role
     ),
     components(
         schemas(
@@ -85,7 +88,8 @@ use utoipa::OpenApi;
             crate::services::templates::SecretCopyMode,
             crate::routes::telemetry::TelemetrySettings,
             crate::routes::admin::InviteUserRequest,
-            crate::routes::admin::InviteUserResponse
+            crate::routes::admin::InviteUserResponse,
+            crate::routes::admin::ChangeUserRoleRequest
         )
     ),
     tags(
