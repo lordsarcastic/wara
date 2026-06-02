@@ -10,15 +10,18 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    entities::environments::Environment,
     errors::ApiError,
-    services::{auth::CurrentUser, projects::ProjectService},
+    models::environments::Environment,
+    services::{
+        auth::{CurrentUser, ensure_workspace_access},
+        workspaces::WorkspaceService,
+    },
     state::AppState,
 };
 
 pub fn router() -> Router<AppState> {
     Router::new().route(
-        "/projects/{project_id}/environments",
+        "/workspaces/{workspace_id}/environments",
         get(list_environments).post(create_environment),
     )
 }
@@ -29,29 +32,31 @@ pub struct CreateEnvironmentRequest {
     pub name: String,
 }
 
-#[utoipa::path(get, path = "/api/v1/projects/{project_id}/environments", security(("bearer_auth" = [])), params(("project_id" = Uuid, Path)), responses((status = 200, body = [Environment])))]
+#[utoipa::path(get, path = "/api/v1/workspaces/{workspace_id}/environments", security(("bearer_auth" = [])), params(("workspace_id" = Uuid, Path)), responses((status = 200, body = [Environment])))]
 pub async fn list_environments(
-    _user: CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
 ) -> Result<Json<Vec<Environment>>, ApiError> {
+    ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
-        ProjectService::new(state.db)
-            .list_environments(project_id)
+        WorkspaceService::new(state.db)
+            .list_environments(workspace_id)
             .await?,
     ))
 }
 
-#[utoipa::path(post, path = "/api/v1/projects/{project_id}/environments", security(("bearer_auth" = [])), params(("project_id" = Uuid, Path)), request_body = CreateEnvironmentRequest, responses((status = 200, body = Environment)))]
+#[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/environments", security(("bearer_auth" = [])), params(("workspace_id" = Uuid, Path)), request_body = CreateEnvironmentRequest, responses((status = 200, body = Environment)))]
 pub async fn create_environment(
-    _user: CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
     Valid(Json(payload)): Valid<Json<CreateEnvironmentRequest>>,
 ) -> Result<Json<Environment>, ApiError> {
+    ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
-        ProjectService::new(state.db)
-            .create_environment(project_id, payload.name)
+        WorkspaceService::new(state.db)
+            .create_environment(workspace_id, payload.name)
             .await?,
     ))
 }

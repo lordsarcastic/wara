@@ -2,7 +2,6 @@ use toasty::stmt::{List, Query};
 use uuid::Uuid;
 
 use crate::{
-    entities::servers::{Server, ServerRecord},
     errors::ApiError,
     libs::{
         crypto,
@@ -10,6 +9,7 @@ use crate::{
         docker::ProxyKind,
         ssh::{self, SshTarget},
     },
+    models::servers::{Server, ServerRecord},
 };
 
 #[derive(Debug, Clone)]

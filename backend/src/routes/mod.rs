@@ -10,17 +10,17 @@ pub mod credentials;
 pub mod deployments;
 pub mod domains;
 pub mod environments;
-pub mod projects;
 pub mod servers;
 pub mod services;
 pub mod telemetry;
 pub mod templates;
+pub mod workspaces;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .merge(auth::router())
         .merge(servers::router())
-        .merge(projects::router())
+        .merge(workspaces::router())
         .merge(environments::router())
         .merge(services::router())
         .merge(credentials::router())

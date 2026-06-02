@@ -3,7 +3,7 @@ use std::process::Command;
 use uuid::Uuid;
 use wara_backend::{
     libs::{config::Config, db},
-    services::projects::ProjectService,
+    services::workspaces::WorkspaceService,
 };
 
 /// Run the real `wara-migrate` binary against `database_url`. Cargo exposes the
@@ -51,21 +51,21 @@ async fn migration_apply_initializes_a_fresh_database() {
     let database = db::connect(&config)
         .await
         .expect("connect to migrated database");
-    let project_service = ProjectService::new(database);
-    let project = project_service
-        .create_project(
+    let workspace_service = WorkspaceService::new(database);
+    let workspace = workspace_service
+        .create_workspace(
             format!("migration-check-{}", Uuid::now_v7().simple()),
             Some("created against a migrated schema".to_string()),
         )
         .await
-        .expect("create project on migrated schema");
-    let environments = project_service
-        .list_environments(project.id)
+        .expect("create workspace on migrated schema");
+    let environments = workspace_service
+        .list_environments(workspace.id)
         .await
         .expect("list environments on migrated schema");
     assert!(
         !environments.is_empty(),
-        "project creation should seed a default environment"
+        "workspace creation should seed a default environment"
     );
 
     // Re-applying is idempotent.

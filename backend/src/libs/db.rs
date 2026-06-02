@@ -1,17 +1,17 @@
 use crate::libs::config::Config;
 use crate::{
-    entities::{
+    errors::ApiError,
+    models::{
         credentials::{DockerCredentialRecord, EnvVarRecord},
         deployments::DeploymentRecord,
         domains::DomainRecord,
         environments::Environment,
-        projects::Project,
         servers::ServerRecord,
         services::AppServiceRecord,
-        templates::ProjectTemplateRecord,
-        users::{UserInviteRecord, UserRecord},
+        templates::WorkspaceTemplateRecord,
+        users::{UserInviteRecord, UserRecord, WorkspaceUserRoleRecord},
+        workspaces::Workspace,
     },
-    errors::ApiError,
 };
 
 #[derive(Clone)]
@@ -29,7 +29,7 @@ pub struct Database {
 pub async fn build_toasty(config: &Config) -> anyhow::Result<toasty::Db> {
     let db = toasty::Db::builder()
         .models(toasty::models!(
-            Project,
+            Workspace,
             Environment,
             ServerRecord,
             AppServiceRecord,
@@ -37,9 +37,10 @@ pub async fn build_toasty(config: &Config) -> anyhow::Result<toasty::Db> {
             EnvVarRecord,
             DomainRecord,
             DeploymentRecord,
-            ProjectTemplateRecord,
+            WorkspaceTemplateRecord,
             UserRecord,
-            UserInviteRecord
+            UserInviteRecord,
+            WorkspaceUserRoleRecord
         ))
         .connect(&config.database_url)
         .await?;

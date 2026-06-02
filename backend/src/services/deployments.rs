@@ -3,16 +3,16 @@ use toasty::stmt::{List, Query};
 use uuid::Uuid;
 
 use crate::{
-    entities::{
-        deployments::{Deployment, DeploymentRecord, DeploymentStatus},
-        services::AppService,
-    },
     errors::ApiError,
     libs::docker::{
         DeployKind, DockerCommandConfig, compose_deploy_commands, dockerfile_deploy_commands,
         image_deploy_commands,
     },
     libs::{config::Config, db::Database},
+    models::{
+        deployments::{Deployment, DeploymentRecord, DeploymentStatus},
+        services::AppService,
+    },
     services::app_services::AppServiceService,
 };
 

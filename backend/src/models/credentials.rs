@@ -3,7 +3,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct DockerCredential {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     pub registry: String,
     pub username: String,
     #[serde(skip_serializing)]
@@ -14,7 +14,7 @@ pub struct DockerCredential {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct EnvVar {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     pub environment_id: Option<Uuid>,
     pub service_id: Option<Uuid>,
     pub key: String,
@@ -28,7 +28,7 @@ pub struct DockerCredentialRecord {
     #[key]
     pub id: Uuid,
     #[index]
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     pub registry: String,
     pub username: String,
     pub encrypted_password: String,
@@ -39,7 +39,7 @@ pub struct EnvVarRecord {
     #[key]
     pub id: Uuid,
     #[index]
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     pub environment_id: Option<Uuid>,
     pub service_id: Option<Uuid>,
     pub key: String,
@@ -50,7 +50,7 @@ impl From<DockerCredentialRecord> for DockerCredential {
     fn from(record: DockerCredentialRecord) -> Self {
         Self {
             id: record.id,
-            project_id: record.project_id,
+            workspace_id: record.workspace_id,
             registry: record.registry,
             username: record.username,
             encrypted_password: record.encrypted_password,
@@ -62,7 +62,7 @@ impl From<EnvVarRecord> for EnvVar {
     fn from(record: EnvVarRecord) -> Self {
         Self {
             id: record.id,
-            project_id: record.project_id,
+            workspace_id: record.workspace_id,
             environment_id: record.environment_id,
             service_id: record.service_id,
             key: record.key,

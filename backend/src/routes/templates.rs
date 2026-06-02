@@ -10,14 +10,14 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    entities::{projects::Project, templates::ProjectTemplate},
     errors::ApiError,
+    models::{templates::WorkspaceTemplate, workspaces::Workspace},
     services::{
-        auth::CurrentUser,
-        project_templates::{
-            CreateProjectsFromTemplateInput, CreateTemplateInput, ProjectTemplateService,
-        },
+        auth::{CurrentUser, ensure_super_admin, ensure_workspace_access},
         templates::SecretCopyMode,
+        workspace_templates::{
+            CreateTemplateInput, CreateWorkspacesFromTemplateInput, WorkspaceTemplateService,
+        },
     },
     state::AppState,
 };
@@ -25,12 +25,12 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
-            "/projects/{project_id}/templates",
-            get(list_project_templates).post(create_template),
+            "/workspaces/{workspace_id}/templates",
+            get(list_workspace_templates).post(create_template),
         )
         .route(
-            "/templates/{id}/projects",
-            axum::routing::post(create_projects_from_template),
+            "/templates/{id}/workspaces",
+            axum::routing::post(create_workspaces_from_template),
         )
 }
 
@@ -43,41 +43,43 @@ pub struct CreateTemplateRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema, Validate)]
-pub struct CreateProjectsFromTemplateRequest {
+pub struct CreateWorkspacesFromTemplateRequest {
     #[validate(length(min = 1, max = 100))]
     pub names: Vec<String>,
     pub secret_copy_mode: SecretCopyMode,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct BulkProjectCreateResponse {
-    pub projects: Vec<Project>,
+pub struct BulkWorkspaceCreateResponse {
+    pub workspaces: Vec<Workspace>,
 }
 
-#[utoipa::path(get, path = "/api/v1/projects/{project_id}/templates", security(("bearer_auth" = [])), params(("project_id" = Uuid, Path)), responses((status = 200, body = [ProjectTemplate])))]
-pub async fn list_project_templates(
-    _user: CurrentUser,
+#[utoipa::path(get, path = "/api/v1/workspaces/{workspace_id}/templates", security(("bearer_auth" = [])), params(("workspace_id" = Uuid, Path)), responses((status = 200, body = [WorkspaceTemplate])))]
+pub async fn list_workspace_templates(
+    Path(workspace_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
-) -> Result<Json<Vec<ProjectTemplate>>, ApiError> {
+) -> Result<Json<Vec<WorkspaceTemplate>>, ApiError> {
+    ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
-        ProjectTemplateService::new(state.db)
-            .list_project_templates(project_id)
+        WorkspaceTemplateService::new(state.db)
+            .list_workspace_templates(workspace_id)
             .await?,
     ))
 }
 
-#[utoipa::path(post, path = "/api/v1/projects/{project_id}/templates", security(("bearer_auth" = [])), params(("project_id" = Uuid, Path)), request_body = CreateTemplateRequest, responses((status = 200, body = ProjectTemplate)))]
+#[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/templates", security(("bearer_auth" = [])), params(("workspace_id" = Uuid, Path)), request_body = CreateTemplateRequest, responses((status = 200, body = WorkspaceTemplate)))]
 pub async fn create_template(
-    _user: CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
     Valid(Json(payload)): Valid<Json<CreateTemplateRequest>>,
-) -> Result<Json<ProjectTemplate>, ApiError> {
+) -> Result<Json<WorkspaceTemplate>, ApiError> {
+    ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
-        ProjectTemplateService::new(state.db)
+        WorkspaceTemplateService::new(state.db)
             .create_template(CreateTemplateInput {
-                project_id,
+                workspace_id,
                 name: payload.name,
                 description: payload.description,
             })
@@ -85,16 +87,21 @@ pub async fn create_template(
     ))
 }
 
-#[utoipa::path(post, path = "/api/v1/templates/{id}/projects", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), request_body = CreateProjectsFromTemplateRequest, responses((status = 200, body = BulkProjectCreateResponse)))]
-pub async fn create_projects_from_template(
-    _user: CurrentUser,
-    State(state): State<AppState>,
+#[utoipa::path(post, path = "/api/v1/templates/{id}/workspaces", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), request_body = CreateWorkspacesFromTemplateRequest, responses((status = 200, body = BulkWorkspaceCreateResponse)))]
+pub async fn create_workspaces_from_template(
     Path(id): Path<Uuid>,
-    Valid(Json(payload)): Valid<Json<CreateProjectsFromTemplateRequest>>,
-) -> Result<Json<BulkProjectCreateResponse>, ApiError> {
-    Ok(Json(BulkProjectCreateResponse {
-        projects: ProjectTemplateService::new(state.db)
-            .create_projects_from_template(CreateProjectsFromTemplateInput {
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
+    Valid(Json(payload)): Valid<Json<CreateWorkspacesFromTemplateRequest>>,
+) -> Result<Json<BulkWorkspaceCreateResponse>, ApiError> {
+    ensure_super_admin(&user)?;
+    let template = WorkspaceTemplateService::new(state.db.clone())
+        .get_template(id)
+        .await?;
+    ensure_workspace_access(&user, template.source_workspace_id)?;
+    Ok(Json(BulkWorkspaceCreateResponse {
+        workspaces: WorkspaceTemplateService::new(state.db)
+            .create_workspaces_from_template(CreateWorkspacesFromTemplateInput {
                 template_id: id,
                 names: payload.names,
                 secret_copy_mode: payload.secret_copy_mode,

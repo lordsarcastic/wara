@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::get,
+    routing::{get, post},
 };
 use axum_valid::Valid;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use validator::Validate;
 
 use crate::{
     services::{
-        auth::CurrentUser,
+        auth::{CurrentUser, ensure_workspace_access},
         credentials::{CreateCredentialInput, CreateEnvVarInput, CredentialService},
     },
     state::AppState,
@@ -20,12 +20,16 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
-            "/projects/{project_id}/credentials",
+            "/workspaces/{workspace_id}/credentials",
             get(list_credentials).post(create_credential),
         )
         .route(
-            "/projects/{project_id}/env-vars",
+            "/workspaces/{workspace_id}/env-vars",
             get(list_env_vars).post(create_env_var),
+        )
+        .route(
+            "/workspaces/{workspace_id}/env-vars/bulk",
+            post(create_env_vars),
         )
 }
 
@@ -42,13 +46,13 @@ pub struct CreateCredentialRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CredentialResponse {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     pub registry: String,
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema, Validate)]
+#[derive(Debug, Deserialize, Serialize, ToSchema, Validate)]
 pub struct CreateEnvVarRequest {
     pub environment_id: Option<Uuid>,
     pub service_id: Option<Uuid>,
@@ -58,40 +62,48 @@ pub struct CreateEnvVarRequest {
     pub value: String,
 }
 
+#[derive(Debug, Deserialize, ToSchema, Validate)]
+pub struct CreateEnvVarsRequest {
+    #[validate(length(min = 1, max = 100), nested)]
+    pub env_vars: Vec<CreateEnvVarRequest>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EnvVarResponse {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
     pub environment_id: Option<Uuid>,
     pub service_id: Option<Uuid>,
     pub key: String,
     pub value: String,
 }
 
-#[utoipa::path(get, path = "/api/v1/projects/{project_id}/credentials", security(("bearer_auth" = [])), params(("project_id" = Uuid, Path)), responses((status = 200, body = [CredentialResponse])))]
+#[utoipa::path(get, path = "/api/v1/workspaces/{workspace_id}/credentials", security(("bearer_auth" = [])), params(("workspace_id" = Uuid, Path)), responses((status = 200, body = [CredentialResponse])))]
 pub async fn list_credentials(
-    _user: CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
 ) -> Result<Json<Vec<CredentialResponse>>, crate::errors::ApiError> {
+    ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
         CredentialService::new(state.db, state.config.secret_key)
-            .list_credentials(project_id)
+            .list_credentials(workspace_id)
             .await?,
     ))
 }
 
-#[utoipa::path(post, path = "/api/v1/projects/{project_id}/credentials", security(("bearer_auth" = [])), params(("project_id" = Uuid, Path)), request_body = CreateCredentialRequest, responses((status = 200, body = CredentialResponse)))]
+#[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/credentials", security(("bearer_auth" = [])), params(("workspace_id" = Uuid, Path)), request_body = CreateCredentialRequest, responses((status = 200, body = CredentialResponse)))]
 pub async fn create_credential(
-    _user: CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
     Valid(Json(payload)): Valid<Json<CreateCredentialRequest>>,
 ) -> Result<Json<CredentialResponse>, crate::errors::ApiError> {
+    ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
         CredentialService::new(state.db, state.config.secret_key)
             .create_credential(CreateCredentialInput {
-                project_id,
+                workspace_id,
                 registry: payload.registry,
                 username: payload.username,
                 password: payload.password,
@@ -100,35 +112,64 @@ pub async fn create_credential(
     ))
 }
 
-#[utoipa::path(get, path = "/api/v1/projects/{project_id}/env-vars", security(("bearer_auth" = [])), params(("project_id" = Uuid, Path)), responses((status = 200, body = [EnvVarResponse])))]
+#[utoipa::path(get, path = "/api/v1/workspaces/{workspace_id}/env-vars", security(("bearer_auth" = [])), params(("workspace_id" = Uuid, Path)), responses((status = 200, body = [EnvVarResponse])))]
 pub async fn list_env_vars(
-    _user: CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
 ) -> Result<Json<Vec<EnvVarResponse>>, crate::errors::ApiError> {
+    ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
         CredentialService::new(state.db, state.config.secret_key)
-            .list_env_vars(project_id)
+            .list_env_vars(workspace_id)
             .await?,
     ))
 }
 
-#[utoipa::path(post, path = "/api/v1/projects/{project_id}/env-vars", security(("bearer_auth" = [])), params(("project_id" = Uuid, Path)), request_body = CreateEnvVarRequest, responses((status = 200, body = EnvVarResponse)))]
+#[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/env-vars", security(("bearer_auth" = [])), params(("workspace_id" = Uuid, Path)), request_body = CreateEnvVarRequest, responses((status = 200, body = EnvVarResponse)))]
 pub async fn create_env_var(
-    _user: CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
     Valid(Json(payload)): Valid<Json<CreateEnvVarRequest>>,
 ) -> Result<Json<EnvVarResponse>, crate::errors::ApiError> {
+    ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
         CredentialService::new(state.db, state.config.secret_key)
             .create_env_var(CreateEnvVarInput {
-                project_id,
+                workspace_id,
                 environment_id: payload.environment_id,
                 service_id: payload.service_id,
                 key: payload.key,
                 value: payload.value,
             })
+            .await?,
+    ))
+}
+
+#[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/env-vars/bulk", security(("bearer_auth" = [])), params(("workspace_id" = Uuid, Path)), request_body = CreateEnvVarsRequest, responses((status = 200, body = [EnvVarResponse])))]
+pub async fn create_env_vars(
+    Path(workspace_id): Path<Uuid>,
+    CurrentUser(user): CurrentUser,
+    State(state): State<AppState>,
+    Valid(Json(payload)): Valid<Json<CreateEnvVarsRequest>>,
+) -> Result<Json<Vec<EnvVarResponse>>, crate::errors::ApiError> {
+    ensure_workspace_access(&user, workspace_id)?;
+    Ok(Json(
+        CredentialService::new(state.db, state.config.secret_key)
+            .create_env_vars(
+                payload
+                    .env_vars
+                    .into_iter()
+                    .map(|env_var| CreateEnvVarInput {
+                        workspace_id,
+                        environment_id: env_var.environment_id,
+                        service_id: env_var.service_id,
+                        key: env_var.key,
+                        value: env_var.value,
+                    })
+                    .collect(),
+            )
             .await?,
     ))
 }
