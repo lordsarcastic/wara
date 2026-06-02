@@ -510,15 +510,16 @@ impl AuthService {
             .map(|record| record.id)
             .unwrap_or_else(Uuid::now_v7);
 
-        for record in records {
-            let mut update_key =
-                Update::<List<JwtPublicKeyRecord>>::new(Query::<List<JwtPublicKeyRecord>>::filter(
-                    JwtPublicKeyRecord::fields().id().eq(record.id),
-                ));
-            update_key.set(6, record.id == active_key_id);
-            update_key.set_returning_none();
-            update_key.exec(&mut db).await.map_err(map_toasty_error)?;
-        }
+        let mut deactivate_keys =
+            Update::<List<JwtPublicKeyRecord>>::new(Query::<List<JwtPublicKeyRecord>>::filter(
+                JwtPublicKeyRecord::fields().is_active().eq(true),
+            ));
+        deactivate_keys.set(6, false);
+        deactivate_keys.set_returning_none();
+        deactivate_keys
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
 
         let existing = Query::<List<JwtPublicKeyRecord>>::filter(
             JwtPublicKeyRecord::fields().id().eq(active_key_id),
