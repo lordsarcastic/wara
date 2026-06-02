@@ -207,8 +207,8 @@ Current auth flow:
 
 1. Login with `POST /api/v1/auth/login`.
 2. Use the returned JWT access token as `Authorization: Bearer <token>`.
-3. Store the returned opaque refresh token securely on the client. The token
-   carries its refresh-token record id (`jti`) and a server-verified MAC.
+3. Store the returned refresh JWT securely on the client. Its `jti` is the
+   refresh-token record id.
 4. Refresh sessions with `POST /api/v1/auth/refresh`; this returns a new access
    token and a new refresh token, and revokes the refresh token that was used.
 5. Logout with `POST /api/v1/auth/logout` to revoke the active refresh token.

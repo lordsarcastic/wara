@@ -2,8 +2,10 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
-use serde::Deserialize;
+use jsonwebtoken::{
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, get_current_timestamp,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -26,6 +28,17 @@ struct TestClaims {
     sub: String,
     email: String,
     role: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TestRefreshClaims {
+    jti: String,
+    sub: String,
+    typ: String,
     iss: String,
     aud: String,
     iat: u64,
@@ -165,7 +178,7 @@ async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() 
         .as_str()
         .expect("refresh token")
         .to_string();
-    assert!(expired_refresh_token.starts_with("wara_refresh_"));
+    assert_eq!(expired_refresh_token.split('.').count(), 3);
 
     let mut db_handle = database.handle().expect("database handle");
     let issued_records = toasty::stmt::Query::<toasty::stmt::List<UserRefreshTokenRecord>>::filter(
@@ -175,13 +188,16 @@ async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() 
     .await
     .expect("list refresh token records");
     assert_eq!(issued_records.len(), 1);
-    assert!(
-        !expired_refresh_token.contains(&issued_records[0].user_id.to_string()),
-        "refresh token must not expose unrelated record fields"
-    );
     let first_claims = decode_access_claims(&config, first_access_token);
     assert!(Uuid::parse_str(&first_claims.jti).is_ok());
     assert_eq!(first_claims.ret, issued_records[0].id.to_string());
+    let first_refresh_claims = decode_refresh_claims(&config, &expired_refresh_token);
+    assert_eq!(first_refresh_claims.jti, issued_records[0].id.to_string());
+    assert_eq!(first_refresh_claims.sub, user_id.to_string());
+    assert_eq!(first_refresh_claims.typ, "refresh");
+    assert_eq!(first_refresh_claims.iss, config.jwt_issuer);
+    assert_eq!(first_refresh_claims.aud, config.jwt_audience);
+    assert!(first_refresh_claims.exp > first_refresh_claims.iat);
 
     let mut expire_token = toasty::stmt::Update::<toasty::stmt::List<UserRefreshTokenRecord>>::new(
         toasty::stmt::Query::<toasty::stmt::List<UserRefreshTokenRecord>>::filter(
@@ -227,6 +243,7 @@ async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() 
         .unwrap();
     assert_eq!(malformed_response.status(), StatusCode::UNAUTHORIZED);
 
+    let unknown_refresh_token = sign_unknown_refresh_token(&config, user_id);
     let unknown_response = app
         .clone()
         .oneshot(
@@ -234,9 +251,9 @@ async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() 
                 .method("POST")
                 .uri("/api/v1/auth/refresh")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"refresh_token":"wara_refresh_unknown-refresh-token"}"#,
-                ))
+                .body(Body::from(format!(
+                    r#"{{"refresh_token":"{unknown_refresh_token}"}}"#
+                )))
                 .unwrap(),
         )
         .await
@@ -293,6 +310,7 @@ async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() 
         .expect("rotated refresh token")
         .to_string();
     assert_eq!(rotated_access_token.split('.').count(), 3);
+    assert_eq!(rotated_refresh_token.split('.').count(), 3);
     assert_ne!(active_refresh_token, rotated_refresh_token);
     assert!(
         !refresh_body.to_string().contains(&active_refresh_token),
@@ -312,14 +330,17 @@ async fn refresh_tokens_are_identified_by_jti_rotated_expirable_and_revocable() 
         .expect("old refresh token record");
     assert!(revoked_old.revoked_at.is_some());
     assert_eq!(active_claims.ret, revoked_old.id.to_string());
-    assert!(active_refresh_token.contains(&active_claims.ret));
+    let active_refresh_claims = decode_refresh_claims(&config, &active_refresh_token);
+    assert_eq!(active_refresh_claims.jti, active_claims.ret);
     let rotated_claims = decode_access_claims(&config, rotated_access_token);
     let active_new = records
         .iter()
         .find(|record| record.id.to_string() == rotated_claims.ret)
         .expect("rotated refresh token record");
     assert!(active_new.revoked_at.is_none());
-    assert!(rotated_refresh_token.contains(&rotated_claims.ret));
+    let rotated_refresh_claims = decode_refresh_claims(&config, &rotated_refresh_token);
+    assert_eq!(rotated_refresh_claims.jti, rotated_claims.ret);
+    assert_eq!(rotated_refresh_claims.sub, user_id.to_string());
     assert!(Uuid::parse_str(&rotated_claims.jti).is_ok());
     assert_ne!(rotated_claims.jti, active_claims.jti);
     assert_eq!(rotated_claims.ret, active_new.id.to_string());
@@ -1059,6 +1080,34 @@ fn decode_access_claims(config: &Config, token: &str) -> TestClaims {
     decode::<TestClaims>(token, &key, &validation)
         .expect("access token should decode")
         .claims
+}
+
+fn decode_refresh_claims(config: &Config, token: &str) -> TestRefreshClaims {
+    let key = DecodingKey::from_rsa_pem(config.jwt_public_key_pem.as_bytes())
+        .expect("test public key should parse");
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&[config.jwt_audience.as_str()]);
+    validation.set_issuer(&[config.jwt_issuer.as_str()]);
+    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub", "jti"]);
+    decode::<TestRefreshClaims>(token, &key, &validation)
+        .expect("refresh token should decode")
+        .claims
+}
+
+fn sign_unknown_refresh_token(config: &Config, user_id: Uuid) -> String {
+    let now = get_current_timestamp();
+    let claims = TestRefreshClaims {
+        jti: Uuid::now_v7().to_string(),
+        sub: user_id.to_string(),
+        typ: "refresh".to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.jwt_audience.clone(),
+        iat: now,
+        exp: now + config.refresh_token_ttl_seconds,
+    };
+    let key = EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
+        .expect("test private key should parse");
+    encode(&Header::new(Algorithm::RS256), &claims, &key).expect("sign refresh token")
 }
 
 async fn login(app: &axum::Router, email: &str, password: &str) -> String {

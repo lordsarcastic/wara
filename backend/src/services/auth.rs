@@ -100,6 +100,17 @@ struct Claims {
     exp: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct RefreshClaims {
+    jti: String,
+    sub: String,
+    typ: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
+
 struct RefreshTokenIssue {
     token: String,
     record: UserRefreshTokenRecord,
@@ -289,7 +300,6 @@ impl AuthService {
         let user = self.user_from_record(user_record).await?;
 
         let new_record_id = Uuid::now_v7();
-        let raw_refresh_token = generate_refresh_token(new_record_id, &self.config.secret_key);
         let now = Utc::now();
         let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
 
@@ -316,6 +326,7 @@ impl AuthService {
         update_old.exec(&mut tx).await.map_err(map_toasty_error)?;
         tx.commit().await.map_err(map_toasty_error)?;
 
+        let raw_refresh_token = self.sign_refresh_token(new_record.id, user.id, now, expires_at)?;
         let token = self.sign_access_token(&user, new_record.id)?;
         Ok(LoginOutput {
             token,
@@ -450,7 +461,6 @@ impl AuthService {
 
     async fn create_refresh_token(&self, user_id: Uuid) -> Result<RefreshTokenIssue, ApiError> {
         let id = Uuid::now_v7();
-        let raw_token = generate_refresh_token(id, &self.config.secret_key);
         let now = Utc::now();
         let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
         let mut db = self.db.handle()?;
@@ -464,6 +474,7 @@ impl AuthService {
         .exec(&mut db)
         .await
         .map_err(map_toasty_error)?;
+        let raw_token = self.sign_refresh_token(id, user_id, now, expires_at)?;
         Ok(RefreshTokenIssue {
             token: raw_token,
             record,
@@ -474,11 +485,9 @@ impl AuthService {
         &self,
         token: &str,
     ) -> Result<UserRefreshTokenRecord, ApiError> {
-        if !token.starts_with("wara_refresh_") {
-            return Err(ApiError::Unauthorized);
-        }
-
-        let token_id = parse_refresh_token_id(token, &self.config.secret_key)?;
+        let claims = self.verify_refresh_token(token)?;
+        let token_id = Uuid::parse_str(&claims.jti).map_err(|_| ApiError::Unauthorized)?;
+        let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
         let mut db = self.db.handle()?;
         let record = Query::<List<UserRefreshTokenRecord>>::filter(
             UserRefreshTokenRecord::fields().id().eq(token_id),
@@ -488,6 +497,9 @@ impl AuthService {
         .await
         .map_err(map_toasty_error)?
         .ok_or(ApiError::Unauthorized)?;
+        if record.user_id != user_id {
+            return Err(ApiError::Unauthorized);
+        }
 
         if record.revoked_at.is_some() {
             return Err(ApiError::Unauthorized);
@@ -621,6 +633,28 @@ impl AuthService {
             .map_err(|error| ApiError::Internal(format!("failed to sign JWT: {error}")))
     }
 
+    fn sign_refresh_token(
+        &self,
+        refresh_token_id: Uuid,
+        user_id: Uuid,
+        issued_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<String, ApiError> {
+        let claims = RefreshClaims {
+            jti: refresh_token_id.to_string(),
+            sub: user_id.to_string(),
+            typ: "refresh".to_string(),
+            iss: self.config.jwt_issuer.clone(),
+            aud: self.config.jwt_audience.clone(),
+            iat: issued_at.timestamp() as u64,
+            exp: expires_at.timestamp() as u64,
+        };
+        let key = EncodingKey::from_rsa_pem(self.config.jwt_private_key_pem.as_bytes())
+            .map_err(|error| ApiError::Internal(format!("invalid JWT private key: {error}")))?;
+        encode(&Header::new(Algorithm::RS256), &claims, &key)
+            .map_err(|error| ApiError::Internal(format!("failed to sign refresh JWT: {error}")))
+    }
+
     fn verify_access_token(&self, token: &str) -> Result<Claims, ApiError> {
         let key = DecodingKey::from_rsa_pem(self.config.jwt_public_key_pem.as_bytes())
             .map_err(|error| ApiError::Internal(format!("invalid JWT public key: {error}")))?;
@@ -631,6 +665,22 @@ impl AuthService {
         decode::<Claims>(token, &key, &validation)
             .map(|data| data.claims)
             .map_err(|_| ApiError::Unauthorized)
+    }
+
+    fn verify_refresh_token(&self, token: &str) -> Result<RefreshClaims, ApiError> {
+        let key = DecodingKey::from_rsa_pem(self.config.jwt_public_key_pem.as_bytes())
+            .map_err(|error| ApiError::Internal(format!("invalid JWT public key: {error}")))?;
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[self.config.jwt_audience.as_str()]);
+        validation.set_issuer(&[self.config.jwt_issuer.as_str()]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub", "jti"]);
+        let claims = decode::<RefreshClaims>(token, &key, &validation)
+            .map(|data| data.claims)
+            .map_err(|_| ApiError::Unauthorized)?;
+        if claims.typ != "refresh" {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(claims)
     }
 }
 
@@ -742,50 +792,12 @@ fn generate_api_token() -> String {
     format!("wara_{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn generate_refresh_token(id: Uuid, secret_key: &str) -> String {
-    let mut bytes = [0_u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    let nonce = URL_SAFE_NO_PAD.encode(bytes);
-    let mac = refresh_token_mac(id, &nonce, secret_key);
-    format!("wara_refresh_{id}.{nonce}.{mac}")
-}
-
 fn hash_invite_token(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
 
 fn hash_api_token(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
-}
-
-fn parse_refresh_token_id(token: &str, secret_key: &str) -> Result<Uuid, ApiError> {
-    let value = token
-        .strip_prefix("wara_refresh_")
-        .ok_or(ApiError::Unauthorized)?;
-    let mut parts = value.split('.');
-    let id = parts
-        .next()
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or(ApiError::Unauthorized)?;
-    let nonce = parts.next().ok_or(ApiError::Unauthorized)?;
-    let mac = parts.next().ok_or(ApiError::Unauthorized)?;
-    if parts.next().is_some() {
-        return Err(ApiError::Unauthorized);
-    }
-    if mac != refresh_token_mac(id, nonce, secret_key) {
-        return Err(ApiError::Unauthorized);
-    }
-    Ok(id)
-}
-
-fn refresh_token_mac(id: Uuid, nonce: &str, secret_key: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(secret_key.as_bytes());
-    hasher.update(b":");
-    hasher.update(id.as_bytes());
-    hasher.update(b":");
-    hasher.update(nonce.as_bytes());
-    URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
 fn token_prefix(token: &str) -> String {
