@@ -9,11 +9,14 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, get_current_timestamp,
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
+    get_current_timestamp,
 };
 use rand::RngCore;
+use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, traits::PublicKeyParts};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use toasty::Executor;
 use toasty::stmt::{List, Query, Update};
 use uuid::Uuid;
 
@@ -22,8 +25,8 @@ use crate::{
     libs::{config::Config, db::Database},
     models::{
         users::{
-            Role, User, UserApiTokenRecord, UserInviteRecord, UserRecord, UserStatus,
-            WorkspaceUserRoleRecord,
+            Jwks, JwtPublicKeyRecord, Role, User, UserApiTokenRecord, UserInviteRecord, UserRecord,
+            UserRefreshTokenRecord, UserStatus, WorkspaceUserRoleRecord,
         },
         workspaces::Workspace,
     },
@@ -39,6 +42,7 @@ pub struct LoginInput {
 #[derive(Debug, Clone)]
 pub struct LoginOutput {
     pub token: String,
+    pub refresh_token: String,
     pub user: User,
 }
 
@@ -65,6 +69,16 @@ pub struct AcceptInviteInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct RefreshSessionInput {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogoutInput {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateApiTokenInput {
     pub user: User,
     pub name: String,
@@ -76,8 +90,16 @@ pub struct CreateApiTokenOutput {
     pub api_token: UserApiTokenRecord,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChangeUserRoleInput {
+    pub user_id: Uuid,
+    pub role: Role,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
+    jti: String,
+    ret: String,
     sub: String,
     email: String,
     role: String,
@@ -85,6 +107,22 @@ struct Claims {
     aud: String,
     iat: u64,
     exp: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RefreshClaims {
+    jti: String,
+    sub: String,
+    typ: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+}
+
+struct RefreshTokenIssue {
+    token: String,
+    record: UserRefreshTokenRecord,
 }
 
 #[derive(Clone)]
@@ -99,6 +137,8 @@ impl AuthService {
     }
 
     pub async fn bootstrap_admin(&self) -> Result<(), ApiError> {
+        self.sync_active_jwt_public_key().await?;
+
         let mut db = self.db.handle()?;
         let users = Query::<List<UserRecord>>::all()
             .exec(&mut db)
@@ -123,6 +163,18 @@ impl AuthService {
         Ok(())
     }
 
+    pub async fn jwks(&self) -> Result<Jwks, ApiError> {
+        let mut db = self.db.handle()?;
+        let mut records = Query::<List<JwtPublicKeyRecord>>::all()
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
+        records.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        Ok(Jwks {
+            keys: records.into_iter().map(Into::into).collect(),
+        })
+    }
+
     pub async fn login(&self, input: LoginInput) -> Result<LoginOutput, ApiError> {
         let user_record = self.find_user_by_email(&input.email).await?;
         if user_record.status != UserStatus::Active.as_str() {
@@ -133,8 +185,16 @@ impl AuthService {
         }
         verify_password(&input.password, &user_record.password_hash)?;
         let user = self.user_from_record(user_record).await?;
-        let token = self.sign_access_token(&user)?;
-        Ok(LoginOutput { token, user })
+        let mut db = self.db.handle()?;
+        let refresh_token = self.issue_refresh_token(&mut db, user.id).await?;
+        let token = self
+            .sign_access_token(&user, refresh_token.record.id)
+            .await?;
+        Ok(LoginOutput {
+            token,
+            refresh_token: refresh_token.token,
+            user,
+        })
     }
 
     pub async fn invite_user(&self, input: InviteUserInput) -> Result<InviteUserOutput, ApiError> {
@@ -217,6 +277,9 @@ impl AuthService {
                 "invite has already been accepted".to_string(),
             ));
         }
+        if user.status == UserStatus::Disabled.as_str() {
+            return Err(ApiError::Unauthorized);
+        }
 
         let password_hash = hash_password(&input.password)?;
         let mut db = self.db.handle()?;
@@ -243,15 +306,80 @@ impl AuthService {
             .map_err(map_toasty_error)?;
 
         let user = self.get_user(invite.user_id).await?;
-        let token = self.sign_access_token(&user)?;
-        Ok(LoginOutput { token, user })
+        let refresh_token = self.issue_refresh_token(&mut db, user.id).await?;
+        let token = self
+            .sign_access_token(&user, refresh_token.record.id)
+            .await?;
+        Ok(LoginOutput {
+            token,
+            refresh_token: refresh_token.token,
+            user,
+        })
+    }
+
+    pub async fn refresh_session(
+        &self,
+        input: RefreshSessionInput,
+    ) -> Result<LoginOutput, ApiError> {
+        let record = self
+            .active_refresh_token_record(&input.refresh_token)
+            .await?;
+        let user_record = self.get_user_record(record.user_id).await?;
+        if user_record.status != UserStatus::Active.as_str() {
+            return Err(ApiError::Unauthorized);
+        }
+        let user = self.user_from_record(user_record).await?;
+
+        let mut db = self.db.handle()?;
+        let mut tx = db.transaction().await.map_err(map_toasty_error)?;
+        let refresh_token = self.issue_refresh_token(&mut tx, user.id).await?;
+
+        let now = Utc::now();
+        let mut update_old = Update::<List<UserRefreshTokenRecord>>::new(Query::<
+            List<UserRefreshTokenRecord>,
+        >::filter(
+            UserRefreshTokenRecord::fields().id().eq(record.id),
+        ));
+        update_old.set(4, now.to_rfc3339());
+        update_old.set_returning_none();
+        update_old.exec(&mut tx).await.map_err(map_toasty_error)?;
+        tx.commit().await.map_err(map_toasty_error)?;
+
+        let token = self
+            .sign_access_token(&user, refresh_token.record.id)
+            .await?;
+        Ok(LoginOutput {
+            token,
+            refresh_token: refresh_token.token,
+            user,
+        })
+    }
+
+    pub async fn logout(&self, input: LogoutInput) -> Result<(), ApiError> {
+        let record = self
+            .active_refresh_token_record(&input.refresh_token)
+            .await?;
+        let mut db = self.db.handle()?;
+        let mut update_token = Update::<List<UserRefreshTokenRecord>>::new(Query::<
+            List<UserRefreshTokenRecord>,
+        >::filter(
+            UserRefreshTokenRecord::fields().id().eq(record.id),
+        ));
+        update_token.set(4, Utc::now().to_rfc3339());
+        update_token.set_returning_none();
+        update_token.exec(&mut db).await.map_err(map_toasty_error)?;
+        Ok(())
     }
 
     pub async fn authenticate_bearer(&self, token: &str) -> Result<User, ApiError> {
-        match self.verify_access_token(token) {
+        match self.verify_access_token(token).await {
             Ok(claims) => {
                 let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
-                self.get_user(user_id).await
+                let user_record = self.get_user_record(user_id).await?;
+                if user_record.status != UserStatus::Active.as_str() {
+                    return Err(ApiError::Unauthorized);
+                }
+                self.user_from_record(user_record).await
             }
             Err(ApiError::Unauthorized) => self.authenticate_api_token(token).await,
             Err(error) => Err(error),
@@ -269,6 +397,56 @@ impl AuthService {
             users.push(self.user_from_record(record).await?);
         }
         Ok(users)
+    }
+
+    pub async fn disable_user(&self, user_id: Uuid) -> Result<User, ApiError> {
+        let record = self.get_user_record(user_id).await?;
+        if record.status == UserStatus::Disabled.as_str() {
+            return self.user_from_record(record).await;
+        }
+        if record.role == Role::SuperAdmin.as_str() && self.active_super_admin_count().await? <= 1 {
+            return Err(ApiError::BadRequest(
+                "cannot disable the last active platform admin".to_string(),
+            ));
+        }
+        self.update_user_status(user_id, UserStatus::Disabled).await
+    }
+
+    pub async fn reactivate_user(&self, user_id: Uuid) -> Result<User, ApiError> {
+        let record = self.get_user_record(user_id).await?;
+        if record.status != UserStatus::Disabled.as_str() {
+            return Err(ApiError::BadRequest(
+                "only disabled users can be reactivated".to_string(),
+            ));
+        }
+        if record.password_hash.is_empty() {
+            return Err(ApiError::BadRequest(
+                "invited users must accept their invite before reactivation".to_string(),
+            ));
+        }
+        self.update_user_status(user_id, UserStatus::Active).await
+    }
+
+    pub async fn change_user_role(&self, input: ChangeUserRoleInput) -> Result<User, ApiError> {
+        let record = self.get_user_record(input.user_id).await?;
+        if record.role == Role::SuperAdmin.as_str()
+            && input.role != Role::SuperAdmin
+            && record.status == UserStatus::Active.as_str()
+            && self.active_super_admin_count().await? <= 1
+        {
+            return Err(ApiError::BadRequest(
+                "cannot remove the last active platform admin".to_string(),
+            ));
+        }
+
+        let mut db = self.db.handle()?;
+        let mut update_user = Update::<List<UserRecord>>::new(Query::<List<UserRecord>>::filter(
+            UserRecord::fields().id().eq(input.user_id),
+        ));
+        update_user.set(3, input.role.as_str());
+        update_user.set_returning_none();
+        update_user.exec(&mut db).await.map_err(map_toasty_error)?;
+        self.get_user(input.user_id).await
     }
 
     pub async fn create_api_token(
@@ -352,6 +530,199 @@ impl AuthService {
         .await
         .map_err(map_toasty_error)?
         .ok_or(ApiError::NotFound("api token"))?;
+        Ok(record)
+    }
+
+    async fn update_user_status(
+        &self,
+        user_id: Uuid,
+        status: UserStatus,
+    ) -> Result<User, ApiError> {
+        let mut db = self.db.handle()?;
+        let mut update_user = Update::<List<UserRecord>>::new(Query::<List<UserRecord>>::filter(
+            UserRecord::fields().id().eq(user_id),
+        ));
+        update_user.set(4, status.as_str());
+        update_user.set_returning_none();
+        update_user.exec(&mut db).await.map_err(map_toasty_error)?;
+        self.get_user(user_id).await
+    }
+
+    async fn active_super_admin_count(&self) -> Result<usize, ApiError> {
+        let mut db = self.db.handle()?;
+        let records = Query::<List<UserRecord>>::filter(
+            UserRecord::fields().role().eq(Role::SuperAdmin.as_str()),
+        )
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?;
+        Ok(records
+            .into_iter()
+            .filter(|record| record.status == UserStatus::Active.as_str())
+            .count())
+    }
+
+    async fn issue_refresh_token(
+        &self,
+        executor: &mut dyn Executor,
+        user_id: Uuid,
+    ) -> Result<RefreshTokenIssue, ApiError> {
+        let id = Uuid::now_v7();
+        let now = Utc::now();
+        let expires_at = now + Duration::seconds(self.config.refresh_token_ttl_seconds as i64);
+        let record = toasty::create!(UserRefreshTokenRecord {
+            id,
+            user_id,
+            created_at: now.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+            revoked_at: None,
+        })
+        .exec(executor)
+        .await
+        .map_err(map_toasty_error)?;
+        let raw_token = self
+            .sign_refresh_token(id, user_id, now, expires_at)
+            .await?;
+        Ok(RefreshTokenIssue {
+            token: raw_token,
+            record,
+        })
+    }
+
+    async fn sync_active_jwt_public_key(&self) -> Result<(), ApiError> {
+        let mut db = self.db.handle()?;
+        let (modulus, exponent) = rsa_public_key_components(&self.config.jwt_public_key)?;
+        let records = Query::<List<JwtPublicKeyRecord>>::all()
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
+        let active_key_id = records
+            .iter()
+            .find(|record| record.modulus == modulus && record.exponent == exponent)
+            .map(|record| record.id)
+            .unwrap_or_else(Uuid::now_v7);
+
+        let mut deactivate_keys =
+            Update::<List<JwtPublicKeyRecord>>::new(Query::<List<JwtPublicKeyRecord>>::filter(
+                JwtPublicKeyRecord::fields().is_active().eq(true),
+            ));
+        deactivate_keys.set(6, false);
+        deactivate_keys.set_returning_none();
+        deactivate_keys
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
+
+        let existing = Query::<List<JwtPublicKeyRecord>>::filter(
+            JwtPublicKeyRecord::fields().id().eq(active_key_id),
+        )
+        .first()
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?;
+        if existing.is_some() {
+            let mut update_key =
+                Update::<List<JwtPublicKeyRecord>>::new(Query::<List<JwtPublicKeyRecord>>::filter(
+                    JwtPublicKeyRecord::fields().id().eq(active_key_id),
+                ));
+            update_key.set(1, "RSA");
+            update_key.set(2, "sig");
+            update_key.set(3, "RS256");
+            update_key.set(4, modulus);
+            update_key.set(5, exponent);
+            update_key.set(6, true);
+            update_key.set_returning_none();
+            update_key.exec(&mut db).await.map_err(map_toasty_error)?;
+        } else {
+            toasty::create!(JwtPublicKeyRecord {
+                id: active_key_id,
+                key_type: "RSA".to_string(),
+                key_use: "sig".to_string(),
+                algorithm: "RS256".to_string(),
+                modulus,
+                exponent,
+                is_active: true,
+                created_at: Utc::now().to_rfc3339(),
+            })
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
+        }
+        Ok(())
+    }
+
+    async fn jwt_public_key_record(&self, key_id: Uuid) -> Result<JwtPublicKeyRecord, ApiError> {
+        let mut db = self.db.handle()?;
+        let record =
+            Query::<List<JwtPublicKeyRecord>>::filter(JwtPublicKeyRecord::fields().id().eq(key_id))
+                .first()
+                .exec(&mut db)
+                .await
+                .map_err(map_toasty_error)?
+                .ok_or(ApiError::Unauthorized)?;
+        if record.key_type != "RSA" || record.key_use != "sig" || record.algorithm != "RS256" {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(record)
+    }
+
+    async fn active_jwt_public_key_record(&self) -> Result<JwtPublicKeyRecord, ApiError> {
+        let mut db = self.db.handle()?;
+        let records = Query::<List<JwtPublicKeyRecord>>::all()
+            .exec(&mut db)
+            .await
+            .map_err(map_toasty_error)?;
+        let record = records
+            .into_iter()
+            .filter(|record| record.is_active)
+            .max_by(|left, right| left.created_at.cmp(&right.created_at))
+            .ok_or_else(|| ApiError::Internal("active JWT public key is missing".to_string()))?;
+        if record.key_type != "RSA" || record.key_use != "sig" || record.algorithm != "RS256" {
+            return Err(ApiError::Internal(
+                "active JWT public key has invalid JWK metadata".to_string(),
+            ));
+        }
+        Ok(record)
+    }
+
+    async fn decoding_key_for_token(&self, token: &str) -> Result<DecodingKey, ApiError> {
+        let header = decode_header(token).map_err(|_| ApiError::Unauthorized)?;
+        let key_id = header.kid.ok_or(ApiError::Unauthorized)?;
+        let key_id = Uuid::parse_str(&key_id).map_err(|_| ApiError::Unauthorized)?;
+        let record = self.jwt_public_key_record(key_id).await?;
+        DecodingKey::from_rsa_components(&record.modulus, &record.exponent).map_err(|error| {
+            ApiError::Internal(format!(
+                "invalid JWT public key components for {key_id}: {error}"
+            ))
+        })
+    }
+
+    async fn active_refresh_token_record(
+        &self,
+        token: &str,
+    ) -> Result<UserRefreshTokenRecord, ApiError> {
+        let claims = self.verify_refresh_token(token).await?;
+        let token_id = Uuid::parse_str(&claims.jti).map_err(|_| ApiError::Unauthorized)?;
+        let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+        let mut db = self.db.handle()?;
+        let record = Query::<List<UserRefreshTokenRecord>>::filter(
+            UserRefreshTokenRecord::fields().id().eq(token_id),
+        )
+        .first()
+        .exec(&mut db)
+        .await
+        .map_err(map_toasty_error)?
+        .ok_or(ApiError::Unauthorized)?;
+        if record.user_id != user_id {
+            return Err(ApiError::Unauthorized);
+        }
+
+        if record.revoked_at.is_some() {
+            return Err(ApiError::Unauthorized);
+        }
+        if parse_rfc3339(&record.expires_at)? <= Utc::now() {
+            return Err(ApiError::Unauthorized);
+        }
         Ok(record)
     }
 
@@ -459,9 +830,15 @@ impl AuthService {
         Ok(invite)
     }
 
-    fn sign_access_token(&self, user: &User) -> Result<String, ApiError> {
+    async fn sign_access_token(
+        &self,
+        user: &User,
+        refresh_token_id: Uuid,
+    ) -> Result<String, ApiError> {
         let now = get_current_timestamp();
         let claims = Claims {
+            jti: Uuid::now_v7().to_string(),
+            ret: refresh_token_id.to_string(),
             sub: user.id.to_string(),
             email: user.email.clone(),
             role: user.role.as_str().to_string(),
@@ -472,13 +849,40 @@ impl AuthService {
         };
         let key = EncodingKey::from_rsa_pem(self.config.jwt_private_key_pem.as_bytes())
             .map_err(|error| ApiError::Internal(format!("invalid JWT private key: {error}")))?;
-        encode(&Header::new(Algorithm::RS256), &claims, &key)
+        let active_key = self.active_jwt_public_key_record().await?;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(active_key.id.to_string());
+        encode(&header, &claims, &key)
             .map_err(|error| ApiError::Internal(format!("failed to sign JWT: {error}")))
     }
 
-    fn verify_access_token(&self, token: &str) -> Result<Claims, ApiError> {
-        let key = DecodingKey::from_rsa_pem(self.config.jwt_public_key_pem.as_bytes())
-            .map_err(|error| ApiError::Internal(format!("invalid JWT public key: {error}")))?;
+    async fn sign_refresh_token(
+        &self,
+        refresh_token_id: Uuid,
+        user_id: Uuid,
+        issued_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<String, ApiError> {
+        let claims = RefreshClaims {
+            jti: refresh_token_id.to_string(),
+            sub: user_id.to_string(),
+            typ: "refresh".to_string(),
+            iss: self.config.jwt_issuer.clone(),
+            aud: self.config.jwt_audience.clone(),
+            iat: issued_at.timestamp() as u64,
+            exp: expires_at.timestamp() as u64,
+        };
+        let key = EncodingKey::from_rsa_pem(self.config.jwt_private_key_pem.as_bytes())
+            .map_err(|error| ApiError::Internal(format!("invalid JWT private key: {error}")))?;
+        let active_key = self.active_jwt_public_key_record().await?;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(active_key.id.to_string());
+        encode(&header, &claims, &key)
+            .map_err(|error| ApiError::Internal(format!("failed to sign refresh JWT: {error}")))
+    }
+
+    async fn verify_access_token(&self, token: &str) -> Result<Claims, ApiError> {
+        let key = self.decoding_key_for_token(token).await?;
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&[self.config.jwt_audience.as_str()]);
         validation.set_issuer(&[self.config.jwt_issuer.as_str()]);
@@ -486,6 +890,21 @@ impl AuthService {
         decode::<Claims>(token, &key, &validation)
             .map(|data| data.claims)
             .map_err(|_| ApiError::Unauthorized)
+    }
+
+    async fn verify_refresh_token(&self, token: &str) -> Result<RefreshClaims, ApiError> {
+        let key = self.decoding_key_for_token(token).await?;
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[self.config.jwt_audience.as_str()]);
+        validation.set_issuer(&[self.config.jwt_issuer.as_str()]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub", "jti"]);
+        let claims = decode::<RefreshClaims>(token, &key, &validation)
+            .map(|data| data.claims)
+            .map_err(|_| ApiError::Unauthorized)?;
+        if claims.typ != "refresh" {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(claims)
     }
 }
 
@@ -603,6 +1022,15 @@ fn hash_invite_token(token: &str) -> String {
 
 fn hash_api_token(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+}
+
+fn rsa_public_key_components(public_key_pem: &str) -> Result<(String, String), ApiError> {
+    let public_key = RsaPublicKey::from_public_key_pem(public_key_pem)
+        .map_err(|error| ApiError::Internal(format!("invalid JWT public key PEM: {error}")))?;
+    Ok((
+        URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
+        URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+    ))
 }
 
 fn token_prefix(token: &str) -> String {

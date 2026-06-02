@@ -4,7 +4,10 @@ use utoipa::OpenApi;
 #[openapi(
     paths(
         crate::routes::health,
+        crate::routes::well_known::jwks,
         crate::routes::auth::login,
+        crate::routes::auth::refresh_session,
+        crate::routes::auth::logout,
         crate::routes::auth::accept_invite,
         crate::routes::auth::me,
         crate::routes::auth::list_api_tokens,
@@ -41,7 +44,10 @@ use utoipa::OpenApi;
         crate::routes::telemetry::get_settings,
         crate::routes::telemetry::update_settings,
         crate::routes::admin::list_users,
-        crate::routes::admin::invite_user
+        crate::routes::admin::invite_user,
+        crate::routes::admin::disable_user,
+        crate::routes::admin::reactivate_user,
+        crate::routes::admin::change_user_role
     ),
     components(
         schemas(
@@ -50,6 +56,8 @@ use utoipa::OpenApi;
             crate::models::users::Role,
             crate::models::users::WorkspaceRole,
             crate::models::users::UserStatus,
+            crate::models::users::JwtPublicKey,
+            crate::models::users::Jwks,
             crate::models::servers::Server,
             crate::models::workspaces::Workspace,
             crate::models::environments::Environment,
@@ -64,6 +72,8 @@ use utoipa::OpenApi;
             crate::libs::docker::ProxyKind,
             crate::routes::auth::LoginRequest,
             crate::routes::auth::LoginResponse,
+            crate::routes::auth::RefreshSessionRequest,
+            crate::routes::auth::LogoutRequest,
             crate::routes::auth::AcceptInviteRequest,
             crate::routes::auth::CreateApiTokenRequest,
             crate::routes::auth::ApiTokenResponse,
@@ -87,7 +97,8 @@ use utoipa::OpenApi;
             crate::services::templates::SecretCopyMode,
             crate::routes::telemetry::TelemetrySettings,
             crate::routes::admin::InviteUserRequest,
-            crate::routes::admin::InviteUserResponse
+            crate::routes::admin::InviteUserResponse,
+            crate::routes::admin::ChangeUserRoleRequest
         )
     ),
     tags(

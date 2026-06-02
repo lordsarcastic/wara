@@ -18,7 +18,7 @@ jwt_private_key_pem: |
   -----BEGIN RSA PRIVATE KEY-----
   replace-with-your-private-key
   -----END RSA PRIVATE KEY-----
-jwt_public_key_pem: |
+jwt_public_key: |
   -----BEGIN PUBLIC KEY-----
   replace-with-your-public-key
   -----END PUBLIC KEY-----

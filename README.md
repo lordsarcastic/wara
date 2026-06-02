@@ -75,6 +75,39 @@ Environment variables override config file values. See:
 - [.env.example](./.env.example)
 - [docs/config.example.yml](./docs/config.example.yml)
 
+JWT access and refresh tokens are signed with `WARA_JWT_PRIVATE_KEY_PEM`. On
+startup Wara reads `WARA_JWT_PUBLIC_KEY`, stores it in the database as JWK
+components (`kid`, `kty`, `use`, `alg`, `n`, `e`), and marks that row active.
+The generated/stored UUIDv7 row id is written into each token header as `kid`.
+Older DB rows are marked inactive, but remain available for verification while
+tokens signed by them expire.
+
+Clients can fetch the active public key set from:
+
+```text
+/.well-known/jwks.json
+```
+
+Generate a new local keypair with:
+
+```bash
+scripts/generate-jwt-keypair.sh
+```
+
+The helper writes PEM files and environment/YAML snippets with restrictive file
+permissions. It generates a UUIDv7 key id when one is not provided and does not
+print private key material to stdout.
+
+JWT signing key rotation is an operator deployment procedure, not an application
+API:
+
+1. Generate a new keypair locally with the helper script.
+2. Set `WARA_JWT_PRIVATE_KEY_PEM` and `WARA_JWT_PUBLIC_KEY` to the new pair.
+3. Restart or roll the backend so every instance stores the new public key as
+   active and signs new tokens with its DB `kid`.
+4. Wait for tokens signed by the old key to expire.
+5. Remove expired inactive keys from the database when they are no longer needed.
+
 For development, the default bootstrapped admin is:
 
 - Email: `admin@wara.local`
@@ -206,9 +239,17 @@ are versioned under `/api/v1`.
 Current auth flow:
 
 1. Login with `POST /api/v1/auth/login`.
-2. Use the returned JWT as `Authorization: Bearer <token>`.
-3. Admins can invite users with `POST /api/v1/admin/users`.
-4. Invited users open `/accept-invite?token=...` and create a password.
+2. Use the returned JWT access token as `Authorization: Bearer <token>`.
+3. Store the returned refresh JWT securely on the client. Its `jti` is the
+   refresh-token record id.
+4. Refresh sessions with `POST /api/v1/auth/refresh`; this returns a new access
+   token and a new refresh token, and revokes the refresh token that was used.
+5. Logout with `POST /api/v1/auth/logout` to revoke the active refresh token.
+6. Admins can invite users with `POST /api/v1/admin/users`.
+7. Invited users open `/accept-invite?token=...` and create a password.
+
+Refresh token plaintext is returned only by login, invite acceptance, and
+refresh responses. Listing, revocation, and error responses must not expose it.
 
 ## Contributing
 

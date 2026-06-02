@@ -17,5 +17,15 @@ snapshot_name = "0002_snapshot.toml"
 
 [[migrations]]
 id = 4264434920377417444
-name = "0003_server_checks.sql"
+name = "0003_refresh_tokens.sql"
 snapshot_name = "0003_snapshot.toml"
+
+[[migrations]]
+id = 4264434920377417445
+name = "0004_jwt_public_keys.sql"
+snapshot_name = "0004_snapshot.toml"
+
+[[migrations]]
+id = 4264434920377417446
+name = "0005_server_checks.sql"
+snapshot_name = "0005_snapshot.toml"

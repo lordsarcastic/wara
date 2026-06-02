@@ -19,6 +19,7 @@ pub mod servers;
 pub mod services;
 pub mod telemetry;
 pub mod templates;
+pub mod well_known;
 pub mod workspaces;
 
 pub fn router(state: AppState) -> Router {
@@ -38,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(normalize_error_response));
 
     let mut app = Router::new()
+        .merge(well_known::router())
         .route("/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
         .nest("/api/v1", api)

@@ -9,7 +9,10 @@ use crate::{
         servers::ServerRecord,
         services::AppServiceRecord,
         templates::WorkspaceTemplateRecord,
-        users::{UserApiTokenRecord, UserInviteRecord, UserRecord, WorkspaceUserRoleRecord},
+        users::{
+            JwtPublicKeyRecord, UserApiTokenRecord, UserInviteRecord, UserRecord,
+            UserRefreshTokenRecord, WorkspaceUserRoleRecord,
+        },
         workspaces::Workspace,
     },
 };
@@ -41,7 +44,9 @@ pub async fn build_toasty(config: &Config) -> anyhow::Result<toasty::Db> {
             UserRecord,
             UserInviteRecord,
             UserApiTokenRecord,
-            WorkspaceUserRoleRecord
+            WorkspaceUserRoleRecord,
+            UserRefreshTokenRecord,
+            JwtPublicKeyRecord
         ))
         .connect(&config.database_url)
         .await?;
