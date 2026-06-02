@@ -146,6 +146,24 @@ impl ServerService {
         })
     }
 
+    pub async fn check_all_servers(&self) -> Result<Vec<ServerCheckResponse>, ApiError> {
+        let servers = self.list_servers().await?;
+        let mut checks = Vec::with_capacity(servers.len());
+        for server in servers {
+            match self.check_server(server.id).await {
+                Ok(check) => checks.push(check),
+                Err(error) => {
+                    tracing::warn!(
+                        server_id = %server.id,
+                        error = %error,
+                        "scheduled server connectivity check failed"
+                    );
+                }
+            }
+        }
+        Ok(checks)
+    }
+
     pub fn ssh_target(&self, server: &Server) -> Result<SshTarget, ApiError> {
         Ok(SshTarget {
             host: server.host.clone(),

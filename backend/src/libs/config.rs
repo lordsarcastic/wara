@@ -112,6 +112,7 @@ pub struct Config {
     pub temporal_frontend_port: u16,
     pub temporal_ui_port: u16,
     pub temporal_ui_cors_origins: String,
+    pub server_connectivity_check_interval_seconds: u64,
     pub prometheus_port: u16,
     pub jaeger_ui_port: u16,
     pub jaeger_grpc_port: u16,
@@ -288,6 +289,11 @@ impl Config {
                 file.temporal_ui_cors_origins,
                 "http://localhost:4200,http://localhost:8080".to_string(),
             ),
+            server_connectivity_check_interval_seconds: u64_setting(
+                "WARA_SERVER_CONNECTIVITY_CHECK_INTERVAL_SECONDS",
+                file.server_connectivity_check_interval_seconds,
+                900,
+            ),
             prometheus_port: u16_setting("PROMETHEUS_PORT", file.prometheus_port, 9090),
             jaeger_ui_port: u16_setting("JAEGER_UI_PORT", file.jaeger_ui_port, 16686),
             jaeger_grpc_port: u16_setting("JAEGER_GRPC_PORT", file.jaeger_grpc_port, 4317),
@@ -360,6 +366,7 @@ struct ConfigFile {
     temporal_frontend_port: Option<u16>,
     temporal_ui_port: Option<u16>,
     temporal_ui_cors_origins: Option<String>,
+    server_connectivity_check_interval_seconds: Option<u64>,
     prometheus_port: Option<u16>,
     jaeger_ui_port: Option<u16>,
     jaeger_grpc_port: Option<u16>,
@@ -458,6 +465,7 @@ mod tests {
             "WARA_TELEMETRY_ENABLED",
             "WARA_REMOTE_SERVICES_ROOT",
             "WARA_DOCKERFILE_CONTEXT_DIR",
+            "WARA_SERVER_CONNECTIVITY_CHECK_INTERVAL_SECONDS",
             "TEMPORAL_NAMESPACE",
             "OTEL_SERVICE_NAME",
         ];
@@ -477,6 +485,7 @@ mod tests {
             telemetry_enabled: Some(true),
             remote_services_root: Some("/srv/wara/apps".to_string()),
             dockerfile_context_dir: Some("src".to_string()),
+            server_connectivity_check_interval_seconds: Some(1800),
             temporal_namespace: Some("wara".to_string()),
             ..ConfigFile::default()
         });
@@ -496,6 +505,7 @@ mod tests {
         assert!(config.telemetry_enabled);
         assert_eq!(config.remote_services_root, "/srv/wara/apps");
         assert_eq!(config.dockerfile_context_dir, "src");
+        assert_eq!(config.server_connectivity_check_interval_seconds, 1800);
         assert_eq!(config.temporal_namespace, "wara");
         assert_eq!(config.otel_service_name, "wara-backend");
         assert!(!config.db_push_schema);

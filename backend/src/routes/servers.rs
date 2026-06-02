@@ -13,7 +13,7 @@ use crate::{
     libs::docker::ProxyKind,
     models::servers::Server,
     services::{
-        auth::{CurrentUser, ensure_super_admin},
+        auth::{AdminUser, CurrentUser, ensure_super_admin},
         servers::{CreateServerInput, ServerCheckResponse, ServerService},
     },
     state::AppState,
@@ -90,10 +90,9 @@ pub async fn get_server(
 #[utoipa::path(post, path = "/api/v1/servers/{id}/check", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), responses((status = 200, body = ServerCheckResponse), (status = 404, body = crate::errors::ErrorResponse)))]
 pub async fn check_server(
     Path(id): Path<Uuid>,
-    CurrentUser(user): CurrentUser,
+    _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<ServerCheckResponse>, ApiError> {
-    ensure_super_admin(&user)?;
     Ok(Json(
         ServerService::new(state.db, state.config.secret_key)
             .check_server(id)

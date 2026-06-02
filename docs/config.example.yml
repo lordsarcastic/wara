@@ -53,6 +53,7 @@ temporal_postgres_port: 5432
 temporal_frontend_port: 7233
 temporal_ui_port: 8081
 temporal_ui_cors_origins: http://localhost:4200,http://localhost:8080
+server_connectivity_check_interval_seconds: 900
 
 prometheus_port: 9090
 jaeger_ui_port: 16686
