@@ -1,6 +1,7 @@
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod deploy_executor;
 pub mod docker;
 pub mod metrics;
 pub mod observability;
