@@ -53,7 +53,8 @@ Rust conventions:
 - Use `uuid::Uuid` for persistent product IDs.
 - Use `chrono` for externally visible timestamps unless a local model requires
   another format.
-- Use `anyhow` at process boundaries and `ApiError` for API/service errors.
+- Use `WaraError` for internal process and infrastructure errors. Use `ApiError`
+  only for errors exposed through HTTP API responses.
 - Add comments only when they explain non-obvious behavior or a security
   decision.
 
