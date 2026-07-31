@@ -30,6 +30,12 @@ pub enum ApiError {
     Internal(String),
 }
 
+impl From<crate::errors::wara::WaraError> for ApiError {
+    fn from(error: crate::errors::wara::WaraError) -> Self {
+        Self::Internal(error.to_string())
+    }
+}
+
 impl ApiError {
     pub fn status(&self) -> StatusCode {
         match self {

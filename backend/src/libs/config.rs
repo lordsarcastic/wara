@@ -353,23 +353,31 @@ impl Config {
                 "WARA_JWT_PRIVATE_KEY_PEM must not be empty",
             ));
         }
-        EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes())
-            .map_err(|error| WaraError::InvalidConfiguration("WARA_JWT_PRIVATE_KEY", error.to_string()))?;
+        EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes()).map_err(|error| {
+            WaraError::InvalidConfiguration("WARA_JWT_PRIVATE_KEY", error.to_string())
+        })?;
 
         if self.jwt_public_key.trim().is_empty() {
-            return Err(WaraError::MissingConfiguration("WARA_JWT_PUBLIC_KEY must not be empty"));
+            return Err(WaraError::MissingConfiguration(
+                "WARA_JWT_PUBLIC_KEY must not be empty",
+            ));
         }
-        DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes())
-            .map_err(|error| WaraError::InvalidConfiguration("WARA_JWT_PUBLIC_KEY", error.to_string()))?;
+        DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes()).map_err(|error| {
+            WaraError::InvalidConfiguration("JWT public key", error.to_string())
+        })?;
 
         self.verify_active_private_key_matches_public_key()
     }
 
     fn verify_active_private_key_matches_public_key(&self) -> Result<(), WaraError> {
-        let signing_key = EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes())
-            .map_err(|error| WaraError::InvalidConfiguration("WARA_JWT_PRIVATE_KEY PEM", error.to_string()))?;
-        let verification_key = DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes())
-            .map_err(|error| WaraError::InvalidConfiguration("WARA_JWT_PUBLIC_KEY", error.to_string()))?;
+        let signing_key =
+            EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes()).map_err(|error| {
+                WaraError::InvalidConfiguration("WARA_JWT_PRIVATE_KEY PEM", error.to_string())
+            })?;
+        let verification_key =
+            DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes()).map_err(|error| {
+                WaraError::InvalidConfiguration("JWT public key", error.to_string())
+            })?;
 
         let now = get_current_timestamp();
         let claims = JwtKeyProbeClaims {
@@ -381,13 +389,15 @@ impl Config {
         };
         let header = Header::new(Algorithm::RS256);
         let token = encode(&header, &claims, &signing_key)
-            .map_err(|error| WaraError::JWTSigning("{error}".to_string()))?;
+            .map_err(|error| WaraError::JwtSigning(error.to_string()))?;
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&[self.jwt_audience.as_str()]);
         validation.set_issuer(&[self.jwt_issuer.as_str()]);
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
         decode::<JwtKeyProbeClaims>(&token, &verification_key, &validation).map_err(|error| {
-            anyhow::anyhow!("active JWT private key does not match configured public key: {error}")
+            WaraError::JwtVerification(format!(
+                "active JWT private key does not match configured public key: {error}"
+            ))
         })?;
         Ok(())
     }
@@ -450,7 +460,7 @@ struct ConfigFile {
 }
 
 impl ConfigFile {
-    fn load_default() -> anyhow::Result<Self> {
+    fn load_default() -> Result<Self, WaraError> {
         let Some(path) = config_path() else {
             return Ok(Self::default());
         };

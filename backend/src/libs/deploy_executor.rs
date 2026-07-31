@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 
-use crate::libs::docker::RemoteCommand;
+use crate::{errors::wara::WaraError, libs::docker::RemoteCommand};
 
 /// The captured result of a single executed (or previewed) command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,7 +83,7 @@ pub fn redact_secrets(text: &str, secrets: &[&str]) -> String {
 /// the transport (a no-op preview here; a real SSH connection in the follow-up).
 #[async_trait]
 pub trait DeployExecutor: Send + Sync {
-    async fn run(&self, commands: &[RemoteCommand]) -> anyhow::Result<DeployRun>;
+    async fn run(&self, commands: &[RemoteCommand]) -> Result<DeployRun, WaraError>;
 }
 
 /// The default executor: renders commands but does not connect or execute. It
@@ -94,7 +94,7 @@ pub struct PreviewExecutor;
 
 #[async_trait]
 impl DeployExecutor for PreviewExecutor {
-    async fn run(&self, commands: &[RemoteCommand]) -> anyhow::Result<DeployRun> {
+    async fn run(&self, commands: &[RemoteCommand]) -> Result<DeployRun, WaraError> {
         let outcomes = commands
             .iter()
             .map(|command| CommandOutcome {
@@ -125,7 +125,7 @@ mod tests {
 
     #[async_trait]
     impl DeployExecutor for RecordingExecutor {
-        async fn run(&self, _commands: &[RemoteCommand]) -> anyhow::Result<DeployRun> {
+        async fn run(&self, _commands: &[RemoteCommand]) -> Result<DeployRun, WaraError> {
             Ok(self.run.clone())
         }
     }

@@ -13,14 +13,19 @@
 //! so `Toasty.toml` and the `toasty/` migration directory resolve.
 
 use toasty_cli::{Config as MigrationConfig, ToastyCli};
-use wara_backend::libs::{config::Config, db};
+use wara_backend::{
+    errors::wara::WaraError,
+    libs::{config::Config, db},
+};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), WaraError> {
     let config = Config::from_env();
     let db = db::build_toasty(&config).await?;
-    let migration_config = MigrationConfig::load()?;
+    let migration_config =
+        MigrationConfig::load().map_err(|error| WaraError::ConfigFile(error.to_string()))?;
     ToastyCli::with_config(db, migration_config)
         .parse_and_run()
         .await
+        .map_err(|error| WaraError::Database(error.to_string()))
 }

@@ -1,3 +1,5 @@
+use crate::errors::wara::WaraError;
+
 #[derive(Debug, Clone)]
 pub struct SshTarget {
     pub host: String,
@@ -14,7 +16,7 @@ pub const DOCKER_VERSION_CHECK_COMMAND: &str = "docker version --format '{{.Serv
 pub async fn run_controlled_commands(
     target: &SshTarget,
     commands: &[String],
-) -> anyhow::Result<String> {
+) -> Result<String, WaraError> {
     validate_allowed_commands(commands)?;
     tracing::info!(
         host = %target.host,
@@ -34,26 +36,30 @@ pub fn server_check_commands() -> Vec<String> {
     ]
 }
 
-pub fn validate_allowed_commands(commands: &[String]) -> anyhow::Result<()> {
+pub fn validate_allowed_commands(commands: &[String]) -> Result<(), WaraError> {
     for command in commands {
         if command != SSH_CONNECTIVITY_CHECK_COMMAND && command != DOCKER_VERSION_CHECK_COMMAND {
-            anyhow::bail!("SSH command is not allowlisted");
+            return Err(WaraError::Ssh("SSH command is not allowlisted".to_string()));
         }
     }
     Ok(())
 }
 
-pub fn parse_server_check_output(output: &str) -> anyhow::Result<String> {
+pub fn parse_server_check_output(output: &str) -> Result<String, WaraError> {
     let lines: Vec<&str> = output
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
     if lines.first() != Some(&"wara-ssh-ok") {
-        anyhow::bail!("SSH connectivity probe did not return expected marker");
+        return Err(WaraError::Ssh(
+            "SSH connectivity probe did not return expected marker".to_string(),
+        ));
     }
     let Some(version) = lines.get(1) else {
-        anyhow::bail!("Docker version output is missing");
+        return Err(WaraError::Ssh(
+            "Docker version output is missing".to_string(),
+        ));
     };
     Ok((*version).to_string())
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid::Uuid;
 use wara_backend::{
+    errors::wara::WaraError,
     libs::{
         config::Config,
         db,
@@ -25,7 +26,7 @@ struct ScriptedExecutor {
 
 #[async_trait]
 impl DeployExecutor for ScriptedExecutor {
-    async fn run(&self, commands: &[RemoteCommand]) -> anyhow::Result<DeployRun> {
+    async fn run(&self, commands: &[RemoteCommand]) -> Result<DeployRun, WaraError> {
         let mut recorded = self.recorded.lock().unwrap();
         *recorded = commands.iter().map(RemoteCommand::render).collect();
         Ok(self.run.clone())

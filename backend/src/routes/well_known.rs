@@ -1,6 +1,11 @@
 use axum::{Json, Router, extract::State, routing::get};
 
-use crate::{errors::api::{ApiError, ErrorResponse}, models::users::Jwks, services::auth::AuthService, state::AppState};
+use crate::{
+    errors::api::{ApiError, ErrorResponse},
+    models::users::Jwks,
+    services::auth::AuthService,
+    state::AppState,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/.well-known/jwks.json", get(jwks))
