@@ -1,6 +1,6 @@
 use crate::libs::config::Config;
 use crate::{
-    errors::ApiError,
+    errors::api::ApiError,
     models::{
         credentials::{DockerCredentialRecord, EnvVarRecord},
         deployments::DeploymentRecord,

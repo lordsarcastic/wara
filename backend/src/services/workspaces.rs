@@ -2,7 +2,7 @@ use toasty::stmt::{List, Query};
 use uuid::Uuid;
 
 use crate::{
-    errors::ApiError,
+    errors::api::ApiError,
     libs::db::Database,
     models::{
         environments::Environment,

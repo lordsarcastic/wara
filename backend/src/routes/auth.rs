@@ -12,7 +12,7 @@ use validator::Validate;
 use uuid::Uuid;
 
 use crate::{
-    errors::ApiError,
+    errors::api::{ApiError, ErrorResponse},
     models::users::{User, UserApiTokenRecord},
     services::auth::{
         AcceptInviteInput, AuthService, CreateApiTokenInput, CurrentUser, LoginInput, LogoutInput,
@@ -96,7 +96,7 @@ pub struct CreateApiTokenResponse {
     post,
     path = "/api/v1/auth/login",
     request_body = LoginRequest,
-    responses((status = 200, body = LoginResponse), (status = 401, body = crate::errors::ErrorResponse))
+    responses((status = 200, body = LoginResponse), (status = 401, body = ErrorResponse))
 )]
 pub async fn login(
     State(state): State<AppState>,
@@ -119,7 +119,7 @@ pub async fn login(
     post,
     path = "/api/v1/auth/refresh",
     request_body = RefreshSessionRequest,
-    responses((status = 200, body = LoginResponse), (status = 401, body = crate::errors::ErrorResponse))
+    responses((status = 200, body = LoginResponse), (status = 401, body = ErrorResponse))
 )]
 pub async fn refresh_session(
     State(state): State<AppState>,
@@ -141,7 +141,7 @@ pub async fn refresh_session(
     post,
     path = "/api/v1/auth/logout",
     request_body = LogoutRequest,
-    responses((status = 204, description = "Refresh token revoked"), (status = 401, body = crate::errors::ErrorResponse))
+    responses((status = 204, description = "Refresh token revoked"), (status = 401, body = ErrorResponse))
 )]
 pub async fn logout(
     State(state): State<AppState>,
@@ -159,7 +159,7 @@ pub async fn logout(
     get,
     path = "/api/v1/auth/me",
     security(("bearer_auth" = [])),
-    responses((status = 200, body = User), (status = 401, body = crate::errors::ErrorResponse))
+    responses((status = 200, body = User), (status = 401, body = ErrorResponse))
 )]
 pub async fn me(CurrentUser(user): CurrentUser) -> Json<User> {
     Json(user)
@@ -169,7 +169,7 @@ pub async fn me(CurrentUser(user): CurrentUser) -> Json<User> {
     post,
     path = "/api/v1/auth/invites/accept",
     request_body = AcceptInviteRequest,
-    responses((status = 200, body = LoginResponse), (status = 401, body = crate::errors::ErrorResponse))
+    responses((status = 200, body = LoginResponse), (status = 401, body = ErrorResponse))
 )]
 pub async fn accept_invite(
     State(state): State<AppState>,
@@ -192,7 +192,7 @@ pub async fn accept_invite(
     get,
     path = "/api/v1/auth/api-tokens",
     security(("bearer_auth" = [])),
-    responses((status = 200, body = [ApiTokenResponse]), (status = 401, body = crate::errors::ErrorResponse))
+    responses((status = 200, body = [ApiTokenResponse]), (status = 401, body = ErrorResponse))
 )]
 pub async fn list_api_tokens(
     CurrentUser(user): CurrentUser,
@@ -213,7 +213,7 @@ pub async fn list_api_tokens(
     path = "/api/v1/auth/api-tokens",
     security(("bearer_auth" = [])),
     request_body = CreateApiTokenRequest,
-    responses((status = 200, body = CreateApiTokenResponse), (status = 401, body = crate::errors::ErrorResponse))
+    responses((status = 200, body = CreateApiTokenResponse), (status = 401, body = ErrorResponse))
 )]
 pub async fn create_api_token(
     CurrentUser(user): CurrentUser,
@@ -237,7 +237,7 @@ pub async fn create_api_token(
     path = "/api/v1/auth/api-tokens/{id}",
     security(("bearer_auth" = [])),
     params(("id" = Uuid, Path)),
-    responses((status = 200, body = ApiTokenResponse), (status = 401, body = crate::errors::ErrorResponse), (status = 404, body = crate::errors::ErrorResponse))
+    responses((status = 200, body = ApiTokenResponse), (status = 401, body = ErrorResponse), (status = 404, body = ErrorResponse))
 )]
 pub async fn revoke_api_token(
     Path(id): Path<Uuid>,

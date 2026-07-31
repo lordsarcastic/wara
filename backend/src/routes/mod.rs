@@ -2,7 +2,7 @@ use axum::{Router, middleware, routing::get};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
-    errors::{ApiError, normalize_error_response},
+    errors::api::{ApiError, normalize_error_response},
     libs::metrics,
     openapi::ApiDoc,
     state::AppState,

@@ -51,7 +51,7 @@ use utoipa::OpenApi;
     ),
     components(
         schemas(
-            crate::errors::ErrorResponse,
+            crate::errors::api::ErrorResponse,
             crate::models::users::User,
             crate::models::users::Role,
             crate::models::users::WorkspaceRole,

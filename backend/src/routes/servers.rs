@@ -9,7 +9,7 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::{
-    errors::ApiError,
+    errors::api::{ApiError, ErrorResponse},
     libs::docker::ProxyKind,
     models::servers::Server,
     services::{
@@ -73,7 +73,7 @@ pub async fn create_server(
     ))
 }
 
-#[utoipa::path(get, path = "/api/v1/servers/{id}", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), responses((status = 200, body = Server), (status = 404, body = crate::errors::ErrorResponse)))]
+#[utoipa::path(get, path = "/api/v1/servers/{id}", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), responses((status = 200, body = Server), (status = 404, body = ErrorResponse)))]
 pub async fn get_server(
     Path(id): Path<Uuid>,
     CurrentUser(user): CurrentUser,
@@ -87,7 +87,7 @@ pub async fn get_server(
     ))
 }
 
-#[utoipa::path(post, path = "/api/v1/servers/{id}/check", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), responses((status = 200, body = ServerCheckResponse), (status = 404, body = crate::errors::ErrorResponse)))]
+#[utoipa::path(post, path = "/api/v1/servers/{id}/check", security(("bearer_auth" = [])), params(("id" = Uuid, Path)), responses((status = 200, body = ServerCheckResponse), (status = 404, body = ErrorResponse)))]
 pub async fn check_server(
     Path(id): Path<Uuid>,
     _admin: AdminUser,

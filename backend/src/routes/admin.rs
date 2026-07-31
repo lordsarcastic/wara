@@ -11,7 +11,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    errors::ApiError,
+    errors::api::ApiError,
     models::users::{Role, User},
     services::auth::{AdminUser, AuthService, ChangeUserRoleInput, CurrentUser, InviteUserInput},
     state::AppState,

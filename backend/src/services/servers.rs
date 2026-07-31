@@ -5,7 +5,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    errors::ApiError,
+    errors::api::ApiError,
     libs::{
         crypto,
         db::Database,
