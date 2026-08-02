@@ -83,7 +83,7 @@ pub async fn list_credentials(
     Path(workspace_id): Path<Uuid>,
     CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<CredentialResponse>>, crate::errors::ApiError> {
+) -> Result<Json<Vec<CredentialResponse>>, crate::errors::api::ApiError> {
     ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
         CredentialService::new(state.db, state.config.secret_key)
@@ -98,7 +98,7 @@ pub async fn create_credential(
     CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
     Valid(Json(payload)): Valid<Json<CreateCredentialRequest>>,
-) -> Result<Json<CredentialResponse>, crate::errors::ApiError> {
+) -> Result<Json<CredentialResponse>, crate::errors::api::ApiError> {
     ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
         CredentialService::new(state.db, state.config.secret_key)
@@ -117,7 +117,7 @@ pub async fn list_env_vars(
     Path(workspace_id): Path<Uuid>,
     CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<EnvVarResponse>>, crate::errors::ApiError> {
+) -> Result<Json<Vec<EnvVarResponse>>, crate::errors::api::ApiError> {
     ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
         CredentialService::new(state.db, state.config.secret_key)
@@ -132,7 +132,7 @@ pub async fn create_env_var(
     CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
     Valid(Json(payload)): Valid<Json<CreateEnvVarRequest>>,
-) -> Result<Json<EnvVarResponse>, crate::errors::ApiError> {
+) -> Result<Json<EnvVarResponse>, crate::errors::api::ApiError> {
     ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
         CredentialService::new(state.db, state.config.secret_key)
@@ -153,7 +153,7 @@ pub async fn create_env_vars(
     CurrentUser(user): CurrentUser,
     State(state): State<AppState>,
     Valid(Json(payload)): Valid<Json<CreateEnvVarsRequest>>,
-) -> Result<Json<Vec<EnvVarResponse>>, crate::errors::ApiError> {
+) -> Result<Json<Vec<EnvVarResponse>>, crate::errors::api::ApiError> {
     ensure_workspace_access(&user, workspace_id)?;
     Ok(Json(
         CredentialService::new(state.db, state.config.secret_key)

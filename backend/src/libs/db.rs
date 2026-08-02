@@ -1,6 +1,6 @@
 use crate::libs::config::Config;
 use crate::{
-    errors::ApiError,
+    errors::{api::ApiError, wara::WaraError},
     models::{
         credentials::{DockerCredentialRecord, EnvVarRecord},
         deployments::DeploymentRecord,
@@ -29,7 +29,7 @@ pub struct Database {
 /// single source of truth. This does not create or migrate the schema; schema is
 /// managed by the `wara-migrate` migration commands (or, for local iteration, by
 /// `WARA_DB_PUSH_SCHEMA`).
-pub async fn build_toasty(config: &Config) -> anyhow::Result<toasty::Db> {
+pub async fn build_toasty(config: &Config) -> Result<toasty::Db, WaraError> {
     let db = toasty::Db::builder()
         .models(toasty::models!(
             Workspace,
@@ -53,7 +53,7 @@ pub async fn build_toasty(config: &Config) -> anyhow::Result<toasty::Db> {
     Ok(db)
 }
 
-pub async fn connect(config: &Config) -> anyhow::Result<Database> {
+pub async fn connect(config: &Config) -> Result<Database, WaraError> {
     let db = build_toasty(config).await?;
 
     // Schema is applied out of band by `wara-migrate migration apply`.

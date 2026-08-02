@@ -1,6 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
 
+use crate::errors::wara::WaraError;
+
 pub fn encrypt_secret(master_key: &str, plaintext: &str) -> String {
     let key = Sha256::digest(master_key.as_bytes());
     let encrypted: Vec<u8> = plaintext
@@ -12,7 +14,7 @@ pub fn encrypt_secret(master_key: &str, plaintext: &str) -> String {
     STANDARD.encode(encrypted)
 }
 
-pub fn decrypt_secret(master_key: &str, ciphertext: &str) -> anyhow::Result<String> {
+pub fn decrypt_secret(master_key: &str, ciphertext: &str) -> Result<String, WaraError> {
     let bytes = STANDARD.decode(ciphertext)?;
     let key = Sha256::digest(master_key.as_bytes());
     let decrypted: Vec<u8> = bytes

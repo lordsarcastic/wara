@@ -5,7 +5,10 @@ use jsonwebtoken::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::libs::docker::{DEFAULT_DOCKERFILE_CONTEXT_DIR, DEFAULT_REMOTE_SERVICES_ROOT};
+use crate::{
+    errors::wara::WaraError,
+    libs::docker::{DEFAULT_DOCKERFILE_CONTEXT_DIR, DEFAULT_REMOTE_SERVICES_ROOT},
+};
 
 pub const DEFAULT_JWT_PRIVATE_KEY_PEM: &str = r#"-----BEGIN RSA PRIVATE KEY-----
 MIIEpAIBAAKCAQEAs5i+coVRLORZo2cnS8ZgM3NrHhIgpTwUpaPbTLWjORDUqWye
@@ -344,26 +347,37 @@ impl Config {
         }
     }
 
-    pub fn validate_jwt_key_config(&self) -> anyhow::Result<()> {
+    pub fn validate_jwt_key_config(&self) -> Result<(), WaraError> {
         if self.jwt_private_key_pem.trim().is_empty() {
-            anyhow::bail!("WARA_JWT_PRIVATE_KEY_PEM must not be empty");
+            return Err(WaraError::MissingConfiguration(
+                "WARA_JWT_PRIVATE_KEY_PEM must not be empty",
+            ));
         }
-        EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes())
-            .map_err(|error| anyhow::anyhow!("invalid active JWT private key PEM: {error}"))?;
+        EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes()).map_err(|error| {
+            WaraError::InvalidConfiguration("WARA_JWT_PRIVATE_KEY", error.to_string())
+        })?;
+
         if self.jwt_public_key.trim().is_empty() {
-            anyhow::bail!("WARA_JWT_PUBLIC_KEY must not be empty");
+            return Err(WaraError::MissingConfiguration(
+                "WARA_JWT_PUBLIC_KEY must not be empty",
+            ));
         }
-        DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes())
-            .map_err(|error| anyhow::anyhow!("invalid JWT public key PEM: {error}"))?;
+        DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes()).map_err(|error| {
+            WaraError::InvalidConfiguration("JWT public key", error.to_string())
+        })?;
 
         self.verify_active_private_key_matches_public_key()
     }
 
-    fn verify_active_private_key_matches_public_key(&self) -> anyhow::Result<()> {
-        let signing_key = EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes())
-            .map_err(|error| anyhow::anyhow!("invalid active JWT private key PEM: {error}"))?;
-        let verification_key = DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes())
-            .map_err(|error| anyhow::anyhow!("invalid JWT public key PEM: {error}"))?;
+    fn verify_active_private_key_matches_public_key(&self) -> Result<(), WaraError> {
+        let signing_key =
+            EncodingKey::from_rsa_pem(self.jwt_private_key_pem.as_bytes()).map_err(|error| {
+                WaraError::InvalidConfiguration("WARA_JWT_PRIVATE_KEY PEM", error.to_string())
+            })?;
+        let verification_key =
+            DecodingKey::from_rsa_pem(self.jwt_public_key.as_bytes()).map_err(|error| {
+                WaraError::InvalidConfiguration("JWT public key", error.to_string())
+            })?;
 
         let now = get_current_timestamp();
         let claims = JwtKeyProbeClaims {
@@ -375,13 +389,15 @@ impl Config {
         };
         let header = Header::new(Algorithm::RS256);
         let token = encode(&header, &claims, &signing_key)
-            .map_err(|error| anyhow::anyhow!("failed to sign JWT key config probe: {error}"))?;
+            .map_err(|error| WaraError::JwtSigning(error.to_string()))?;
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&[self.jwt_audience.as_str()]);
         validation.set_issuer(&[self.jwt_issuer.as_str()]);
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
         decode::<JwtKeyProbeClaims>(&token, &verification_key, &validation).map_err(|error| {
-            anyhow::anyhow!("active JWT private key does not match configured public key: {error}")
+            WaraError::JwtVerification(format!(
+                "active JWT private key does not match configured public key: {error}"
+            ))
         })?;
         Ok(())
     }
@@ -444,7 +460,7 @@ struct ConfigFile {
 }
 
 impl ConfigFile {
-    fn load_default() -> anyhow::Result<Self> {
+    fn load_default() -> Result<Self, WaraError> {
         let Some(path) = config_path() else {
             return Ok(Self::default());
         };

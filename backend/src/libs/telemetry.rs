@@ -1,12 +1,12 @@
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::libs::config::Config;
+use crate::{errors::wara::WaraError, libs::config::Config};
 
 pub struct TelemetryGuard {
     _enabled: bool,
 }
 
-pub fn init(config: &Config) -> anyhow::Result<TelemetryGuard> {
+pub fn init(config: &Config) -> Result<TelemetryGuard, WaraError> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer()
         .json()
@@ -34,6 +34,6 @@ pub fn init(config: &Config) -> anyhow::Result<TelemetryGuard> {
     })
 }
 
-pub fn shutdown(_guard: TelemetryGuard) -> anyhow::Result<()> {
+pub fn shutdown(_guard: TelemetryGuard) -> Result<(), WaraError> {
     Ok(())
 }

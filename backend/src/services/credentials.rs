@@ -2,7 +2,7 @@ use toasty::stmt::{List, Query};
 use uuid::Uuid;
 
 use crate::{
-    errors::ApiError,
+    errors::api::ApiError,
     libs::{crypto, db::Database},
     models::credentials::{DockerCredentialRecord, EnvVarRecord},
     routes::credentials::{CredentialResponse, EnvVarResponse},

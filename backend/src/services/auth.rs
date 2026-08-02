@@ -21,7 +21,7 @@ use toasty::stmt::{List, Query, Update};
 use uuid::Uuid;
 
 use crate::{
-    errors::ApiError,
+    errors::api::ApiError,
     libs::{config::Config, db::Database},
     models::{
         users::{

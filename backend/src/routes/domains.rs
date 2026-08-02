@@ -10,7 +10,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    errors::ApiError,
+    errors::api::ApiError,
     libs::docker::ProxyKind,
     models::domains::Domain,
     services::{

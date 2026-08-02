@@ -1,5 +1,5 @@
 use crate::{
-    errors::ApiError,
+    errors::api::ApiError,
     libs::db::Database,
     services::servers::{ServerCheckResponse, ServerService},
 };

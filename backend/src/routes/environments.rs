@@ -10,7 +10,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    errors::ApiError,
+    errors::api::ApiError,
     models::environments::Environment,
     services::{
         auth::{CurrentUser, ensure_workspace_access},

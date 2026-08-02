@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use tokio::time::{self, MissedTickBehavior};
 use wara_backend::{
+    errors::wara::WaraError,
     libs::{config::Config, db, telemetry},
     services::{
         activities::server_checks::ServerCheckActivities, queues::QueueName,
@@ -10,12 +11,12 @@ use wara_backend::{
 };
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), WaraError> {
     let queue = std::env::args()
         .nth(1)
         .map(|value| value.parse::<QueueName>())
         .transpose()
-        .map_err(anyhow::Error::msg)?
+        .map_err(|error| WaraError::InvalidQueue(error.to_string()))?
         .unwrap_or(QueueName::Default);
     let config = Config::from_env();
     let guard = telemetry::init(&config)?;
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_server_connectivity_workflow(
     config: Config,
     db: wara_backend::libs::db::Database,
-) -> anyhow::Result<()> {
+) -> Result<(), WaraError> {
     let input = ServerConnectivityWorkflowInput {
         interval_seconds: config.server_connectivity_check_interval_seconds,
     };

@@ -4,6 +4,7 @@ use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use wara_backend::{
+    errors::wara::WaraError,
     libs::{config::Config, db, telemetry},
     routes,
     services::auth::AuthService,
@@ -11,7 +12,7 @@ use wara_backend::{
 };
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), WaraError> {
     let config = Config::from_env();
     config.validate_jwt_key_config()?;
     let telemetry_guard = telemetry::init(&config)?;
@@ -25,13 +26,19 @@ async fn main() -> anyhow::Result<()> {
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
-    let addr: SocketAddr = config.bind_addr.parse()?;
-    let listener = TcpListener::bind(addr).await?;
+    let addr: SocketAddr = config
+        .bind_addr
+        .parse::<SocketAddr>()
+        .map_err(|error| WaraError::InvalidConfiguration("BIND_ADDR", error.to_string()))?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|error| WaraError::ConfigFile(error.to_string()))?;
     info!(%addr, "Wara backend listening");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await
+        .map_err(|error| WaraError::Telemetry(error.to_string()))?;
     telemetry::shutdown(telemetry_guard)?;
     Ok(())
 }
