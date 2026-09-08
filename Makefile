@@ -6,6 +6,10 @@ FRONTEND_DIR := frontend
 CLI_DIR := cli
 MCP_DIR := mcp
 QUEUE ?= default
+WARA_TEST_SERVER_KEY_DIR ?= .wara-test-server
+WARA_TEST_SERVER_HOST_ROOT ?= /tmp/wara-docker-server
+WARA_TEST_SERVER_REMOTE_ROOT ?= /tmp/wara-docker-server/services
+WARA_TEST_SERVER_SSH_PORT ?= 2222
 
 .PHONY: help
 help: ## Show available make targets.
@@ -42,6 +46,62 @@ ps: ## Show Docker Compose service status.
 .PHONY: compose-config
 compose-config: ## Validate the root Docker Compose config.
 	$(DOCKER_COMPOSE) config --quiet
+
+.PHONY: docker-server-key
+docker-server-key: ## Create the local SSH key for the Docker-backed test server.
+	@mkdir -p $(WARA_TEST_SERVER_KEY_DIR)
+	@if [ ! -f "$(WARA_TEST_SERVER_KEY_DIR)/id_ed25519" ]; then \
+		ssh-keygen -t ed25519 -N "" -f "$(WARA_TEST_SERVER_KEY_DIR)/id_ed25519" -C "wara-docker-server" >/dev/null; \
+	fi
+	@chmod 600 "$(WARA_TEST_SERVER_KEY_DIR)/id_ed25519"
+	@chmod 644 "$(WARA_TEST_SERVER_KEY_DIR)/id_ed25519.pub"
+
+.PHONY: docker-server-up
+docker-server-up: docker-server-key ## Start the Docker-backed SSH test server.
+	@mkdir -p "$(WARA_TEST_SERVER_HOST_ROOT)/services"
+	COMPOSE_PROFILES=docker-server \
+	WARA_TEST_SERVER_HOST_ROOT="$(WARA_TEST_SERVER_HOST_ROOT)" \
+	WARA_TEST_SERVER_REMOTE_ROOT="$(WARA_TEST_SERVER_REMOTE_ROOT)" \
+	WARA_TEST_SERVER_SSH_PORT="$(WARA_TEST_SERVER_SSH_PORT)" \
+	$(DOCKER_COMPOSE) up -d --build --wait docker-server
+
+.PHONY: docker-server-down
+docker-server-down: ## Stop the Docker-backed SSH test server.
+	COMPOSE_PROFILES=docker-server \
+	WARA_TEST_SERVER_HOST_ROOT="$(WARA_TEST_SERVER_HOST_ROOT)" \
+	WARA_TEST_SERVER_REMOTE_ROOT="$(WARA_TEST_SERVER_REMOTE_ROOT)" \
+	WARA_TEST_SERVER_SSH_PORT="$(WARA_TEST_SERVER_SSH_PORT)" \
+	$(DOCKER_COMPOSE) stop docker-server
+	COMPOSE_PROFILES=docker-server $(DOCKER_COMPOSE) rm -f docker-server
+
+.PHONY: docker-server-logs
+docker-server-logs: ## Tail Docker-backed SSH test server logs.
+	COMPOSE_PROFILES=docker-server $(DOCKER_COMPOSE) logs -f docker-server
+
+.PHONY: docker-server-config
+docker-server-config: ## Validate the Docker-backed SSH test server Compose config.
+	COMPOSE_PROFILES=docker-server \
+	WARA_TEST_SERVER_HOST_ROOT="$(WARA_TEST_SERVER_HOST_ROOT)" \
+	WARA_TEST_SERVER_REMOTE_ROOT="$(WARA_TEST_SERVER_REMOTE_ROOT)" \
+	WARA_TEST_SERVER_SSH_PORT="$(WARA_TEST_SERVER_SSH_PORT)" \
+	$(DOCKER_COMPOSE) config --quiet
+
+.PHONY: docker-server-ssh
+docker-server-ssh: docker-server-key ## Open SSH into the Docker-backed test server.
+	ssh -i "$(WARA_TEST_SERVER_KEY_DIR)/id_ed25519" \
+		-p "$(WARA_TEST_SERVER_SSH_PORT)" \
+		-o UserKnownHostsFile=/dev/null \
+		-o StrictHostKeyChecking=no \
+		deploy@localhost
+
+.PHONY: docker-server-check
+docker-server-check: docker-server-key ## Check SSH, Docker CLI, and Docker Compose on the test server.
+	ssh -i "$(WARA_TEST_SERVER_KEY_DIR)/id_ed25519" \
+		-p "$(WARA_TEST_SERVER_SSH_PORT)" \
+		-o UserKnownHostsFile=/dev/null \
+		-o StrictHostKeyChecking=no \
+		deploy@localhost \
+		'docker version && docker compose version && test -w "$(WARA_TEST_SERVER_REMOTE_ROOT)"'
 
 .PHONY: backend-run
 backend-run: ## Run the backend API locally.

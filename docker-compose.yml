@@ -70,6 +70,24 @@ services:
       temporal:
         condition: service_healthy
 
+  docker-server:
+    profiles:
+      - docker-server
+    build:
+      context: ./dev/docker-server
+    environment:
+      WARA_TEST_SERVER_REMOTE_ROOT: ${WARA_TEST_SERVER_REMOTE_ROOT:-/tmp/wara-docker-server/services}
+    ports:
+      - "${WARA_TEST_SERVER_SSH_PORT:-2222}:22"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.wara-test-server/id_ed25519.pub:/tmp/wara-authorized-keys/id_ed25519.pub:ro
+      - ${WARA_TEST_SERVER_HOST_ROOT:-/tmp/wara-docker-server}:/tmp/wara-docker-server
+    healthcheck:
+      test: ["CMD-SHELL", "sshd -t"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
 volumes:
   postgres-data:
-

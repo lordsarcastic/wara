@@ -4,3 +4,4 @@ node_modules
 dist
 .angular
 .env
+.wara-test-server

@@ -129,6 +129,55 @@ Default URLs:
 - Swagger UI: `http://localhost:8080/docs`
 - OpenAPI JSON: `http://localhost:8080/api/openapi.json`
 
+## Run A Local Docker-Backed Test Server
+
+Use this when you need Wara to connect to a real server over SSH and run real
+Docker commands during development.
+
+```bash
+make docker-server-up
+make docker-server-check
+```
+
+The test server listens on:
+
+- Internal Compose host: `docker-server`
+- Internal Compose port: `22`
+- Host machine port: `2222`
+- Host machine address: `localhost`
+- User: `deploy`
+- Private key: `.wara-test-server/id_ed25519`
+
+It uses the host Docker socket at `/var/run/docker.sock`. This is not
+Docker-in-Docker. Commands run through SSH control the same Docker daemon that
+your local `docker` command uses.
+
+For deployment tests, configure Wara's remote services root to:
+
+```text
+/tmp/wara-docker-server/services
+```
+
+That path is intentionally visible to both the SSH container and the host Docker
+daemon. This keeps Compose files, build contexts, and env files readable when
+the Docker CLI inside the test server talks to the host Docker daemon.
+
+Stop the server with:
+
+```bash
+make docker-server-down
+```
+
+Security note: this server can control the host Docker daemon. Use it only for
+local development or trusted opt-in CI jobs.
+
+Because the test server is part of the root Compose stack, Wara containers can
+reach it at:
+
+```text
+docker-server:22
+```
+
 ## Run Backend Locally
 
 Start dependencies:
